@@ -4,6 +4,7 @@ import { Palette } from 'lucide-vue-next';
 import { ui } from '../../shared/ui-copy.js';
 import { WORKBENCH_THEMES } from '../../shared/workbench-theme.js';
 
+const { theme: themeCopy } = ui.workbench;
 const props = defineProps({ theme: { type: String, required: true }, saving: Boolean });
 const emit = defineEmits(['select']);
 const root = ref(null);
@@ -52,13 +53,13 @@ onBeforeUnmount(() => {
 <template>
   <div ref="root" class="workbench-theme-picker" @keydown.stop="onKey">
     <button ref="trigger" type="button" class="button subtle theme-trigger"
-      :aria-label="ui.workbench.theme.title" :title="ui.workbench.theme.title"
+      :aria-label="themeCopy.title" :title="themeCopy.title"
       :aria-expanded="opened" aria-controls="workbench-theme-options" @click="toggle">
       <Palette :size="16" aria-hidden="true"/>
     </button>
-    <div v-show="opened" id="workbench-theme-options" class="theme-options" role="group" :aria-label="ui.workbench.theme.title">
+    <div v-show="opened" id="workbench-theme-options" class="theme-options" role="group" :aria-label="themeCopy.title">
       <button v-for="id in WORKBENCH_THEMES" :key="id" type="button"
-        class="theme-option" :aria-label="ui.workbench.theme[id]" :aria-pressed="theme===id"
+        class="theme-option" :aria-label="themeCopy[id]" :aria-pressed="theme===id"
         :disabled="saving" @click="pick(id)">
         <span class="theme-swatch" :data-workbench-theme="id" aria-hidden="true"/>
       </button>
