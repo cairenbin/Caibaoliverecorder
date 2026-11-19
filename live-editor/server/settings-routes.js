@@ -1,3 +1,4 @@
+import { isWorkbenchTheme, WORKBENCH_THEME_SETTING } from '../shared/workbench-theme.js';
 import { json, body } from './http-response.js';
 import { writableDirectory, openDirectory } from './directories.js';
 import { chatRate, validateChatRate, CHAT_RATE_SETTING } from './chat-rules.js';
@@ -17,6 +18,12 @@ export async function handleSettingsRoutes({req,res,p},{store,media,stylePreview
     if(!result){if(res.destroyed)return true;throw new Error('样式预览超时，请重试。');}
     const {bytes,samples,contentType}=result;
     res.writeHead(200,{'Content-Type':contentType,'Cache-Control':'no-store','Content-Length':bytes.length,'X-Danmaku-Preview-Count':samples});res.end(bytes);return true;
+  }
+  if(p==='/api/workbench-theme'&&req.method==='POST'){
+    const {theme}=await body(req)??{};
+    if(!isWorkbenchTheme(theme))return json(res,{error:'请选择有效的色彩主题。'},400);
+    store.setting(WORKBENCH_THEME_SETTING,theme);
+    return json(res,{theme});
   }
   if(p==='/api/settings'&&req.method==='POST'){
     const input=await body(req);

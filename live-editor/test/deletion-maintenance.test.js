@@ -91,7 +91,7 @@ test('已确认的清理重试移除数据库行，成片、配置、备份保�
   f.store.run('INSERT INTO jobs(id,session,status,mode,file,data) VALUES(?,?,?,?,?,?)','clean',r.s.id,'running','clean',output,'{}');
   await assert.rejects(f.store.deleteSession(r.s.id,true),/导出/);await fs.stat(r.file);
   f.store.run("UPDATE jobs SET status='done'");
-  f.store.run("UPDATE sessions SET deleted_at='confirmed',purge_started_at='confirmed' WHERE id=?",r.s.id);
+  f.store.confirmDeletion(r.s.id);
   const maintenance=new DeletionMaintenance(f.store);await maintenance.tick();await maintenance.close();
   assert.equal(f.store.all('SELECT * FROM sources').length,0);
   for(const file of [r.file,r.log,r.chunk])await missing(file);
@@ -117,4 +117,75 @@ test('重复录制/删除后空库回收数据库页和 WAL，保留设置、删
   }
   assert.ok(Math.max(...sizes)<512*1024,JSON.stringify(sizes));
   assert.ok(Math.max(...sizes)-Math.min(...sizes)<32768,JSON.stringify(sizes));
+});
+
+for (const mode of ['before', 'manual', 'automatic']) {
+  test(`缓存已清空时同进程恢复清理：${mode}`, async t => {
+    const f = await setup(t), r = await recording(f), c = cache(f);
+    const lease = await c.build({version:1,sessionId:r.s.id,sourceId:r.source.id,startMs:0,endMs:1000,sourceFingerprint:'s',profileHash:'p',assHash:'a'}, file => fs.writeFile(file,minimalMp4));
+    lease.release();
+    const directory = path.dirname(lease.file);
+    await write(path.join(directory, '.DS_Store'));
+    if (mode !== 'before') assert.equal((await f.store.deleteSession(r.s.id,true)).pending,true);
+    for (const name of await fs.readdir(directory)) await fs.unlink(path.join(directory,name));
+    if (mode === 'automatic') {
+      const maintenance = new DeletionMaintenance(f.store);
+      await maintenance.tick();
+      await maintenance.close();
+    } else {
+      assert.equal((await f.store.deleteSession(r.s.id,true)).ok,true);
+    }
+    assert.equal(f.store.pendingCleanup().length,0);
+    assert.equal(c.entries.size,0);
+    await missing(directory);
+  });
+}
+test('原片已处理后重试保护同名新文件', async t => {
+  const f = await setup(t), r = await recording(f);
+  const cacheRoot = path.join(f.root,'render-cache','v1',r.s.id);
+  cache(f);
+  await write(path.join(cacheRoot,'user-note.txt'));
+  assert.equal((await f.store.deleteSession(r.s.id,true)).pending,true);
+  await missing(r.file);
+  await write(r.file,'a different recording');
+  await f.store.deleteSession(r.s.id,true);
+  assert.equal(await fs.readFile(r.file,'utf8'),'a different recording');
+});
+
+test('历史未完成任务遇到同名文件时自动重试保留它', async t => {
+  const f = await setup(t), r = await recording(f);
+  f.store.run("UPDATE sessions SET deleted_at='confirmed',purge_started_at='confirmed' WHERE id=?",r.s.id);
+  await write(r.file,'a different recording');
+  const maintenance = new DeletionMaintenance(f.store);
+  await maintenance.tick();
+  await maintenance.close();
+  assert.equal(await fs.readFile(r.file,'utf8'),'a different recording');
+  assert.equal(f.store.pendingCleanup()[0].canKeep,true);
+});
+
+test('可保留的残留允许结束任务，但不删除未知文件', async t => {
+  const f = await setup(t), r = await recording(f);
+  const c = cache(f);
+  const unknown = await write(path.join(c.root,r.s.id,'unrecognized.txt'),'keep');
+  assert.equal((await f.store.deleteSession(r.s.id,true)).pending,true);
+  assert.equal(f.store.pendingCleanup()[0].canKeep,true);
+  const result=await f.store.deleteSession(r.s.id,true,{keepRetained:true});
+  assert.equal(result.pending,false);
+  assert.equal(f.store.pendingCleanup().length,0);
+  assert.equal(f.store.retainedCleanup()[0].retained[0].path,path.dirname(unknown));
+  assert.equal(await fs.readFile(unknown,'utf8'),'keep');
+});
+
+test('刷新时数据目录不可达不会把缺失误报为清理完成', async t => {
+  const f=await setup(t),r=await recording(f);
+  f.store.confirmDeletion(r.s.id);
+  const real=fs.lstat.bind(fs);
+  const stat=t.mock.method(fs,'lstat',async(file,options)=>{
+    if(file===f.root)throw Object.assign(Error('media disconnected'),{code:'ENOENT'});
+    return real(file,options);
+  });
+  await assert.rejects(f.store.deleteSession(r.s.id,true),{code:'CLEANUP_STORAGE'});
+  assert.equal(f.store.pendingCleanup()[0].canKeep,false);
+  stat.mock.restore();
+  assert.equal((await f.store.deleteSession(r.s.id,true)).ok,true);
 });

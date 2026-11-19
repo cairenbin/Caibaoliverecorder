@@ -1,5 +1,6 @@
 <script setup>
 import { ui } from '../shared/ui-copy.js';
+import { messageEditsKey } from '../shared/message-edits.js';
 
 import { ref, shallowRef, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import DanmakuOverlay from './components/DanmakuOverlay.vue';
@@ -21,6 +22,8 @@ import RecordingTimestamp from './components/RecordingTimestamp.vue';
 import RecordingSettings from './components/RecordingSettings.vue';
 import SettingsGroup from './components/SettingsGroup.vue';
 import RecorderStatus from './components/RecorderStatus.vue';
+import WorkbenchThemePicker from './components/WorkbenchThemePicker.vue';
+import { DEFAULT_WORKBENCH_THEME, isWorkbenchTheme } from '../shared/workbench-theme.js';
 import RecordingLayout from './components/RecordingLayout.vue';
 import { CAMERA_POSITIONS, normalizedRecordingStyle } from '../shared/recording-style.js';
 import { TIMESTAMP_STYLES, normalizedTimestampStyle, TIMESTAMP_POSITIONS, normalizedTimestampPosition } from '../shared/timestamp-style.js';
@@ -72,8 +75,52 @@ const coreStatus=computed(()=>{
   return core.biliOnline?ui.workbench.B站服务就绪:ui.workbench.录制服务未连接;
 });
 const selected=ref(null),detail=ref(null),edit=ref({revision:0,ranges:[],excluded:[],undo:[]});
+const olderSessions=ref([]), olderCursor=ref(null), loadingOlder=ref(false), noMoreSessions=ref(false);
+const pendingEdits=ref(new Map()), detailError=ref('');
+const unsavedEdit=computed(()=>pendingEdits.value.has(selected.value));
+const materialSessions=computed(()=>{
+  const seen=new Set(state.value.pendingCleanup?.map(item=>item.id));
+  return [...state.value.sessions,...olderSessions.value].filter(item=>{
+    if(seen.has(item.id))return false;
+    seen.add(item.id);
+    return true;
+  });
+});
+async function loadOlderSessions(){
+  if(loadingOlder.value||noMoreSessions.value)return;
+  const cursor=olderCursor.value||state.value.sessions.at(-1);
+  if(!cursor)return;
+  loadingOlder.value=true;
+  try{
+    const query=new URLSearchParams({before:cursor.created,id:cursor.id});
+    const {sessions}=await api('sessions?'+query);
+    olderSessions.value.push(...sessions);
+    olderCursor.value=sessions.at(-1)||cursor;
+    noMoreSessions.value=sessions.length<200;
+  }catch(error){tell(error.message);}
+  finally{loadingOlder.value=false;}
+}
 const roomUrl=ref(''),addingRoom=ref(false),notice=ref(''),noticeKind=ref('error'),saving=ref(false),connected=ref(false);
 const noticeSequence=ref(0);
+const choosingTheme=ref('');
+const workbenchTheme=computed(()=>{
+  const theme=choosingTheme.value||state.value.workbenchTheme;
+  return isWorkbenchTheme(theme)?theme:DEFAULT_WORKBENCH_THEME;
+});
+watch(workbenchTheme, theme => {
+  document.documentElement.dataset.workbenchTheme = theme;
+}, { immediate: true });
+onBeforeUnmount(() => { delete document.documentElement.dataset.workbenchTheme; });
+async function setWorkbenchTheme(theme){
+  if(choosingTheme.value||theme===workbenchTheme.value)return;
+  choosingTheme.value=theme;
+  try{
+    const saved=await api('workbench-theme',{theme},{signal:AbortSignal.timeout(8000)});
+    state.value.workbenchTheme=saved.theme;
+  }catch(error){tell(error.message);}
+  finally{choosingTheme.value='';}
+}
+
 const recoveryNoticeKey=computed(()=>{const r=state.value.recovery||{};return JSON.stringify([!!r.safeMode,!!r.recovering,r.isolatedRecords||0,!!r.coreConfigRecovered,r.error||'']);});
 const roomChoice=shallowRef(null),roomChoicePlatform=ref(''),roomChoiceError=ref('');
 const giftFeed=shallowRef([]);
@@ -103,7 +150,7 @@ const lotteryTarget=ref(null),lotteryEditing=ref(false),lotteryLoading=ref(false
 let lotteryDetailRequest=0;
 const senderWarning=computed(()=>senderFilter.value?.mode==='approx'?ui.workbench.打码昵称匹配提示:senderFilter.value?.mode==='name'?ui.workbench.同名用户提示:'');
 const jobMenu=ref(null),jobDeleteTarget=ref(null),jobDeletePreview=shallowRef(null),jobPreviewLoading=ref(false),jobDeleteError=ref('');
-const jobDeleteRecordOnly=ref(false);
+const jobDeleteRecordOnly=ref(false),abandonSave=ref(false);
 const retrySaveTarget=ref(null),retrySaveDirectory=ref(''),retrySaveError=ref(''),retrySavingIds=ref([]),jobRetryErrors=ref({});
 const cacheWarningGBDraft=ref(null),cacheWarningBusy=ref(false),cacheWarningError=ref(''),cacheWarningDismissed=ref('');
 const maxCacheWarningInputGB = Math.floor(MAX_CACHE_WARNING_GB);
@@ -122,16 +169,18 @@ const danmakuVisible=computed(()=>!!selected.value&&danmakuPreference.value);
 watch(selected,()=>{danmakuPreference.value=true;},{flush:'sync'});
 const pendingCleanup=computed(()=>(state.value.pendingCleanup||[]).map(item=>({...item,task:state.value.deletions?.find(task=>task.id===item.id)})));
 const requestedDeletions=new Map();
-function cleanupLabel(item){const task=item.task;if(!task)return item.purge_error?ui.workbench.等待重试:ui.workbench.等待清理;const count=task.total?`（${task.completed}/${task.total}）`:'';return ({resources:ui.workbench.正在释放占用,checking:ui.workbench.正在核对文件,files:ui.workbench.正在清理文件,cache:ui.workbench.正在清理缓存,temporary:ui.workbench.正在清理临时文件,records:ui.workbench.正在清理记录,waiting:ui.workbench.等待占用释放随后自动重试})[task.phase]+count;}
+function cleanupLabel(item){const task=item.task;if(!task)return item.canKeep?ui.workbench.有文件已保留:item.purge_error?ui.workbench.等待重试:ui.workbench.等待清理;const count=task.total?`（${task.completed}/${task.total}）`:'';return ({resources:ui.workbench.正在释放占用,checking:ui.workbench.正在核对文件,files:ui.workbench.正在清理文件,cache:ui.workbench.正在清理缓存,temporary:ui.workbench.正在清理临时文件,records:ui.workbench.正在清理记录,waiting:ui.workbench.等待占用释放随后自动重试})[task.phase]+count;}
 const selectionReady=computed(()=>!!selected.value&&detail.value?.id===selected.value);
 const confirmation=computed(()=>['remove-room','delete-session','delete-job'].includes(modal.value));
-const jobMenuTarget=computed(()=>state.value.jobs.find(job=>job.id===jobMenu.value?.id));
+const jobMenuTarget=computed(()=>visibleJobs.value.find(job=>job.id===jobMenu.value?.id));
 const retrySaveJob=computed(()=>state.value.jobs.find(job=>job.id===retrySaveTarget.value?.id));
 const retrySaveBlock=computed(()=>retrySaveReason(retrySaveJob.value));
 const retrySaveCategory=computed(()=>retrySaveTarget.value?.scope==='full'?'完整素材':'导出片段');
 const jobDeleteBlock=computed(()=>{
   if(modal.value!=='delete-job')return '';
-  const blocked=jobRemovalBlock(state.value.jobs.find(job=>job.id===jobDeleteTarget.value?.id));if(blocked)return blocked;
+  const job=visibleJobs.value.find(job=>job.id===jobDeleteTarget.value?.id)||jobDeleteTarget.value;
+  if(abandonSave.value)return job?.status==='save_failed'?'':ui.workbench.该任务当前不需要重试保存;
+  const blocked=jobRemovalBlock(job);if(blocked)return blocked;
   if(jobDeleteRecordOnly.value)return '';
   if(jobPreviewLoading.value)return ui.workbench.正在核对导出文件;
   if(!jobDeletePreview.value)return ui.workbench.请先核对该任务对应的导出文件;
@@ -139,15 +188,15 @@ const jobDeleteBlock=computed(()=>{
 });
 const deleteBlock=computed(()=>{
   if(modal.value!=='delete-session'||!confirmTarget.value)return '';
-  const s=[...state.value.sessions,...pendingCleanup.value].find(s=>s.id===confirmTarget.value.id);
+  const s=[...materialSessions.value,...pendingCleanup.value].find(s=>s.id===confirmTarget.value.id);
   if(!s)return ui.workbench.素材已被永久删除;
   if(s.status!=='finished')return ui.workbench.录制中禁止删除;
   if(state.value.jobs.some(j=>j.session===s.id&&j.status==='save_failed'))return ui.workbench.待保存成片阻止删除;
   if(s.archive_status==='running'||state.value.jobs.some(j=>j.session===s.id&&['queued','running','finalizing','saving','cancelling'].includes(j.status)))return ui.workbench.素材使用中禁止删除;
   return '';
 });
-const modalTitle=computed(()=>({settings:ui.workbench.设置,'edit-message':ui.workbench.编辑文本,lottery:lotteryEditing.value?ui.workbench.编辑奖品备注:ui.workbench.天选时刻中奖名单,'danmaku-style':ui.workbench.调整弹幕样式,'recording-style':ui.workbench.调整录制样式,'cookie-management':ui.common.Cookie管理,'xiaohongshu-cookie-notice':ui.credentials.小红书采集提示标题,export:exportScope.value==='full'?ui.workbench.导出完整素材:ui.workbench.导出选段,'choose-room':ui.workbench.选择主播,'remove-room':ui.common.移除监控主播,'delete-session':ui.workbench.删除已录制素材,'delete-job':ui.workbench.删除导出任务,'retry-save':ui.workbench.更换保存位置})[modal.value]||'');
-const activeSession=computed(()=>state.value.sessions.find(s=>s.id===selected.value)||detail.value);
+const modalTitle=computed(()=>({settings:ui.workbench.设置,'edit-message':ui.workbench.编辑文本,lottery:lotteryEditing.value?ui.workbench.编辑奖品备注:ui.workbench.天选时刻中奖名单,'danmaku-style':ui.workbench.调整弹幕样式,'recording-style':ui.workbench.调整录制样式,'cookie-management':ui.common.Cookie管理,'xiaohongshu-cookie-notice':ui.credentials.小红书采集提示标题,export:exportScope.value==='full'?ui.workbench.导出完整素材:ui.workbench.导出选段,'choose-room':ui.workbench.选择主播,'remove-room':ui.common.移除监控主播,'delete-session':ui.workbench.删除已录制素材,'delete-job':abandonSave.value?ui.workbench.放弃这次导出:ui.workbench.删除导出任务,'retry-save':ui.workbench.更换保存位置})[modal.value]||'');
+const activeSession=computed(()=>materialSessions.value.find(s=>s.id===selected.value)||detail.value);
 const preparationEnabled=computed(()=>state.value.preparation?.enabled!==false);
 const livePreparationEnabled=computed(()=>state.value.preparation?.liveEnabled===true);
 const selectedPreparation=computed(()=>preparationFor(selected.value));
@@ -191,7 +240,27 @@ const visibleMessages=computed(()=>mergedMessages.value.filter(row=>Number.isFin
   (scrubbing.value||row.time>=messageRange.value.from&&row.time<=messageRange.value.to)));
 const overlayFeed=shallowRef([]);
 let overlayBusy=false, overlayWindow=null;
-const myJobs=computed(()=>state.value.jobs.filter(j=>j.session===selected.value));
+const jobHistory=ref([]), jobHistoryCursor=ref(0), loadingJobHistory=ref(false);
+const visibleJobs=computed(()=>{
+  const seen=new Set(state.value.jobs.map(job=>job.id));
+  return [...state.value.jobs,...jobHistory.value.filter(job=>!seen.has(job.id))];
+});
+const myJobs=computed(()=>visibleJobs.value.filter(job=>job.session===selected.value).sort((a,b)=>String(b.created||'').localeCompare(String(a.created||''))));
+async function loadJobHistory(){
+  const id=selected.value,version=selectionGeneration;
+  if(!id||loadingJobHistory.value)return;
+  loadingJobHistory.value=true;
+  try{
+    const result=await api(`sessions/${id}/export-history?before=${jobHistoryCursor.value}`);
+    if(selected.value!==id||version!==selectionGeneration)return;
+    jobHistory.value.push(...result.jobs);
+    jobHistoryCursor.value=result.next;
+  }catch(error){if(selected.value===id&&version===selectionGeneration)tell(error.message);}
+  finally{if(selected.value===id&&version===selectionGeneration)loadingJobHistory.value=false;}
+}
+function resetJobHistory(){
+  jobHistory.value=[];jobHistoryCursor.value=0;loadingJobHistory.value=false;
+}
 const selectedRanges=computed(()=>edit.value.ranges.filter(r=>r.selected!==false));
 const allRangesSelected=computed(()=>edit.value.ranges.length>0&&selectedRanges.value.length===edit.value.ranges.length);
 const rangeDuration=computed(()=>selectedRanges.value.reduce((n,r)=>n+r.end-r.start,0));
@@ -266,7 +335,7 @@ function preparationReason(entry){
   return reasons[entry?.reason]||(['queued','waiting'].includes(entry?.status)?ui.workbench.等待后台空闲:entry?.status==='paused'?ui.workbench.已手动暂停可随时继续:'');
 }
 function preparationActionBlock(session){
-  const current=state.value.sessions.find(item=>item.id===session?.id);if(!current)return ui.workbench.素材已被删除;
+  const current=materialSessions.value.find(item=>item.id===session?.id);if(!current)return ui.workbench.素材已被删除;
   if(current.status!=='finished')return ui.workbench.录制或整理完成后可开始后台预处理;if(!(current.duration>0))return ui.workbench.这份素材暂时没有可预处理的画面;
   if(preparationSettingsBusy.value||preparationBusyIds.value.includes(current.id))return ui.workbench.正在更新预处理状态;
   const action=preparationAction(preparationFor(current.id));if(!action)return ui.workbench.后台预处理已完成后台预处理已完成;
@@ -331,7 +400,7 @@ async function clearPreparationCache(){
 function setPreparationEnabled(enabled){return updatePreparationSettings({enabled});}
 function setLivePreparationEnabled(liveEnabled){return updatePreparationSettings({liveEnabled});}
 async function actPreparation(session){
-  const id=session?.id,current=state.value.sessions.find(item=>item.id===id),blocked=preparationActionBlock(current);if(blocked){tell(blocked);return;}
+  const id=session?.id,current=materialSessions.value.find(item=>item.id===id),blocked=preparationActionBlock(current);if(blocked){tell(blocked);return;}
   const action=preparationAction(preparationFor(id));if(!action)return;closeContext();preparationBusyIds.value.push(id);delete preparationErrors.value[id];
   try{const result=await api(`sessions/${encodeURIComponent(id)}/preparation`,{action});if(disposing)return;applyPreparation(result);await refresh();}
   catch(e){if(!disposing){preparationErrors.value[id]=e.message;tell(e.message);}}
@@ -372,17 +441,17 @@ async function loadSignals(force=false){
 function signalsVisibility(){if(document.hidden){clearTimeout(windowSignalTimer);windowSignalTimer=null;invalidateSignals();}else void loadSignals(true);}
 
 function resetSelection(){
-  disposePreview();selectionGeneration++;invalidatePreview();senderFilter.value=null;selected.value=null;detail.value=null;
+  detailError.value='';resetJobHistory();disposePreview();selectionGeneration++;invalidatePreview();senderFilter.value=null;selected.value=null;detail.value=null;
   invalidateMessages();invalidateSignals(true);resetTimelineNavigation();pausePreview();
   previewUrl.value='';loading.value=false;previewEnded.value=false;previewBase.value=0;scrubbing.value=false;
   edit.value={revision:0,ranges:[],excluded:[],undo:[]};messages.value=[];giftRows.value=[];lotteryRows.value=[];giftFeed.value=[];overlayFeed.value=[];position.value=0;
   clearDraftMarks();
 }
 function applyState(value){
-  state.value=value;if(selected.value&&!value.sessions.some(s=>s.id===selected.value))resetSelection();
+  state.value=value;if(selected.value&&!materialSessions.value.some(s=>s.id===selected.value))resetSelection();
   for(const [id,title] of requestedDeletions){
     if(!value.sessions.some(s=>s.id===id)&&!value.pendingCleanup?.some(s=>s.id===id)&&!value.deletions?.some(s=>s.id===id)){
-      requestedDeletions.delete(id);tell(ui.workbench.素材清理完成(title),'success');
+      requestedDeletions.delete(id);tell(value.retainedCleanup?.some(item=>item.session===id)?ui.workbench.清理结束已保留文件:ui.workbench.素材清理完成(title),'success');
     }
   }
 }
@@ -439,10 +508,25 @@ function messageMenuKey(event){const buttons=[...event.currentTarget.querySelect
 async function showContext(event,session){closeContext();const rect=event.currentTarget.getBoundingClientRect();sessionMenu.value={session,x:Math.max(8,Math.min(event.clientX||rect.left+30,window.innerWidth-248)),y:Math.max(8,event.clientY||rect.bottom)};await nextTick();const menu=document.querySelector('.session-context');if(menu&&sessionMenu.value)sessionMenu.value.y=Math.max(8,Math.min(sessionMenu.value.y,window.innerHeight-menu.offsetHeight-8));menu?.querySelector('button:not(:disabled)')?.focus();}
 const cancellingJobIds=ref([]);
 const retryExportIds=ref([]);
+async function abandonExport(job){
+  closeContext();
+  jobDeleteTarget.value={...job};
+  jobDeletePreview.value=null;
+  jobDeleteError.value='';
+  jobDeleteRecordOnly.value=true;
+  abandonSave.value=true;
+  modal.value='delete-job';
+  await nextTick();
+  document.querySelector('.job-delete-cancel')?.focus();
+}
 async function retryExportJob(job){
   if(!job?.canRetryExport||retryExportIds.value.includes(job.id))return;
   closeContext();retryExportIds.value.push(job.id);
-  try{await api(`jobs/${encodeURIComponent(job.id)}/retry`,{});tell(ui.workbench.导出重试已安排,'success');await refresh();}
+  try{
+    const result=await api(`jobs/${encodeURIComponent(job.id)}/retry`,{});
+    tell(result.status==='save_failed'?ui.workbench.成片已暂存重试保存无需重新编码:result.status==='done'?ui.workbench.导出完成:ui.workbench.导出重试已安排,'success');
+    await refresh();
+  }
   catch(error){tell(error.message);}finally{retryExportIds.value=retryExportIds.value.filter(id=>id!==job.id);}
 }
 function jobCancellationBlock(job){return !job?ui.workbench.任务不存在:cancellingJobIds.value.includes(job.id)||job.status==='cancelling'?ui.workbench.正在取消请稍候:job.status==='saving'?ui.workbench.成片正在保存完成后可删除:!['queued','running','finalizing'].includes(job.status)?ui.workbench.该任务当前无法取消:'';}
@@ -494,7 +578,7 @@ async function loadJobDeletePreview(clearError=true){
   finally{if(request===jobPreviewRequest)jobPreviewLoading.value=false;}
 }
 async function requestJobDelete(job){
-  const blocked=jobRemovalBlock(job);if(blocked){tell(blocked);return;}closeContext();jobDeleteTarget.value={...job};jobDeletePreview.value=null;jobDeleteError.value='';jobDeleteRecordOnly.value=false;modal.value='delete-job';
+  const blocked=jobRemovalBlock(job);if(blocked){tell(blocked);return;}closeContext();jobDeleteTarget.value={...job};jobDeletePreview.value=null;jobDeleteError.value='';jobDeleteRecordOnly.value=false;abandonSave.value=false;modal.value='delete-job';
   await nextTick();document.querySelector('.job-delete-cancel')?.focus();void loadJobDeletePreview();
 }
 async function confirmJobRemoval(){
@@ -502,7 +586,7 @@ async function confirmJobRemoval(){
   const recordOnly=jobDeleteRecordOnly.value;
   if(!recordOnly&&(jobDeletePreview.value?.id!==jobDeleteTarget.value?.id||typeof jobDeletePreview.value?.token!=='string'||!jobDeletePreview.value.token.trim()))return;
   const id=jobDeleteTarget.value.id,token=jobDeletePreview.value?.token;modalBusy.value=true;jobDeleteError.value='';
-  try{await api(`jobs/${encodeURIComponent(id)}/delete`,recordOnly?{confirmed:true,recordOnly:true}:{confirmed:true,token});state.value.jobs=state.value.jobs.filter(job=>job.id!==id);modal.value='';jobPreviewRequest++;jobDeleteTarget.value=null;jobDeletePreview.value=null;tell(recordOnly?ui.workbench.任务记录已移除现有文件保留:ui.workbench.导出任务删除成功,'success');await refresh();await nextTick();focusJob(id);}
+  try{await api(`jobs/${encodeURIComponent(id)}/delete`,recordOnly?{confirmed:true,recordOnly:true,abandonSave:abandonSave.value}:{confirmed:true,token});state.value.jobs=state.value.jobs.filter(job=>job.id!==id);jobHistory.value=jobHistory.value.filter(job=>job.id!==id);modal.value='';jobPreviewRequest++;jobDeleteTarget.value=null;jobDeletePreview.value=null;tell(recordOnly?ui.workbench.任务记录已移除现有文件保留:ui.workbench.导出任务删除成功,'success');await refresh();await nextTick();focusJob(id);}
   catch(e){jobDeleteError.value=e.message;if(!recordOnly)await loadJobDeletePreview(false);}
   finally{modalBusy.value=false;}
 }
@@ -511,34 +595,96 @@ async function deleteRecording(id){
   // Only wait for acceptance; a disconnected page never cancels confirmed cleanup.
   return api('sessions/'+id+'/delete',{confirmed:true,background:true},{signal:AbortSignal.timeout(15000)});
 }
+const cleanupRequests=ref(new Set());
+async function retryCleanup(item,keepRetained=false){
+  if(cleanupRequests.value.has(item.id))return;
+  cleanupRequests.value.add(item.id);
+  try{
+    await api('sessions/'+item.id+'/retry-cleanup',{keepRetained});
+    requestedDeletions.set(item.id,item.title);
+    await refresh();
+  }catch(error){tell(error.message);}
+  finally{cleanupRequests.value.delete(item.id);}
+}
 function requestRemove(room){confirmTarget.value={...room};modal.value='remove-room';}
 async function confirmRemoval(){if(!['remove-room','delete-session'].includes(modal.value)||!confirmTarget.value||modalBusy.value||deleteBlock.value)return;modalBusy.value=true;const kind=modal.value,target=confirmTarget.value;try{
   if(kind==='remove-room'){await api('anchors/'+target.key+'/remove',{confirmed:true});tell(ui.workbench.已移除监控主播已录制素材保留,'success');}
-  else if(kind==='delete-session'){materialDeleteError.value='';await deleteRecording(target.id);requestedDeletions.set(target.id,target.title);if(selected.value===target.id)resetSelection();tell(ui.workbench.已开始后台清理可继续操作其他素材,'success');}
+  else if(kind==='delete-session'){materialDeleteError.value='';await deleteRecording(target.id);requestedDeletions.set(target.id,target.title);olderSessions.value=olderSessions.value.filter(item=>item.id!==target.id);pendingEdits.value.delete(target.id);if(selected.value===target.id)resetSelection();tell(ui.workbench.已开始后台清理可继续操作其他素材,'success');}
   modal.value='';void refresh();
 }catch(e){if(kind==='delete-session'){materialDeleteError.value=e.name==='TimeoutError'?ui.workbench.清理确认超时:e.message;tell(materialDeleteError.value);void refresh();}else tell(e.message);}finally{modalBusy.value=false;}}
 function statusText(s){return ({recording:ui.common.录制中,waiting:ui.common.等待重连,finishing:ui.workbench.整理中,finished:ui.workbench.已完成,importing:ui.workbench.整理中})[s]||s;}
 function tell(text,kind='error'){noticeSequence.value++;notice.value=text;noticeKind.value=kind;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice.value='',8000);}
-const stateTransport=stateSync({read:signal=>api('state',undefined,{signal}),apply:applyState,connected:value=>connected.value=value,detail:()=>refreshDetail()});
+const stateTransport=stateSync({read:signal=>api('state',undefined,{signal}),apply:applyState,connected:value=>{
+  const reconnected=value&&!connected.value;
+  connected.value=value;
+  if(reconnected&&unsavedEdit.value&&selectionReady.value&&!saving.value)void save();
+},detail:()=>refreshDetail()});
 async function refreshDetail(force=false){
-  if(disposing||detailBusy||!selected.value||!selectionReady.value||(!force&&document.hidden))return;
-  const id=selected.value,version=selectionGeneration,current=activeSession.value;
+  if(disposing||detailBusy||!selected.value||(!force&&document.hidden))return;
+  const id=selected.value,version=selectionGeneration,current=activeSession.value,initial=!selectionReady.value;
   const settled=detail.value?.id===id&&current?.status==='finished'&&detail.value.status==='finished'&&detail.value.duration===current.duration&&detail.value.sources.every(s=>s.metadata||!s.duration);
   if(!force&&settled&&Date.now()-detailRefreshedAt<30000)return;
   detailBusy=true;
-  try{const result=await api(`sessions/${id}`,undefined,{signal:AbortSignal.timeout(8000)});if(!disposing&&selected.value===id&&version===selectionGeneration){detail.value=result;detailRefreshedAt=Date.now();if(previewEnded.value&&isPlaying.value)playNext();}}
-  catch{}finally{detailBusy=false;}
+  try{
+    const result=await api(`sessions/${id}`,undefined,{signal:AbortSignal.timeout(8000)});
+    if(disposing||selected.value!==id||version!==selectionGeneration)return;
+    detail.value=result;detailRefreshedAt=Date.now();detailError.value='';
+    if(initial){
+      void loadJobHistory();
+      edit.value=pendingEdits.value.get(id)||result.edit;
+      if(!canUseRecordingTime.value)positionMode.value='video';
+      query.value='';resetMessageKey();
+      await Promise.all([loadMessages(true),loadOverlay()]);
+    }
+    if(previewEnded.value&&isPlaying.value)playNext();
+  }catch(error){
+    if(selected.value!==id||version!==selectionGeneration)return;
+    if(error.status===404){
+      olderSessions.value=olderSessions.value.filter(item=>item.id!==id);
+      resetSelection();tell(error.message);
+    }else if(initial)detailError.value=error.message;
+  }finally{
+    detailBusy=false;
+    if(selected.value&&selectionGeneration!==version&&!selectionReady.value)void refreshDetail(true);
+  }
 }
 async function refresh(){await stateTransport.refresh();await refreshDetail(true);}
 async function choose(id){
   if(selected.value===id){closeContext();resetSelection();return;}
-  const version=++selectionGeneration;senderFilter.value=null;
+  selectionGeneration++;senderFilter.value=null;detailError.value='';resetJobHistory();
   detail.value=null;invalidateMessages();invalidateSignals(true);resetTimelineNavigation();
   disposePreview();overlayWindow=null;closeContext();clearDraftMarks();invalidatePreview();video.value?.pause();previewUrl.value='';isPlaying.value=false;loading.value=false;selected.value=id;detail.value=null;edit.value={revision:0,ranges:[],excluded:[],undo:[]};messages.value=[];giftRows.value=[];lotteryRows.value=[];giftFeed.value=[];overlayFeed.value=[];position.value=0;previewEnded.value=false;
-  try{const result=await api(`sessions/${id}`);if(selected.value!==id||version!==selectionGeneration)return;detail.value=result;edit.value=result.edit;if(!canUseRecordingTime.value)positionMode.value='video';query.value='';resetMessageKey();await Promise.all([loadMessages(true),loadOverlay()]);}
-  catch(e){if(version===selectionGeneration)tell(e.message);}
+  await refreshDetail(true);
 }
-async function save(){if(saving.value||!selectionReady.value)return false;const id=selected.value,version=selectionGeneration;saving.value=true;try{const result=await api(`sessions/${id}/edit`,{...edit.value,filterLottery:true});if(selected.value===id&&version===selectionGeneration){edit.value=result;return true;}return false;}catch(e){tell(e.message);if(selected.value===id&&version===selectionGeneration){const result=await api(`sessions/${id}`);if(selected.value===id&&version===selectionGeneration)edit.value=result.edit;}return false;}finally{saving.value=false;}}
+async function save(){
+  if(saving.value||!selectionReady.value)return false;
+  const id=selected.value,version=selectionGeneration;
+  const draft={...JSON.parse(JSON.stringify(edit.value)),filterLottery:true};
+  pendingEdits.value.set(id,draft);
+  saving.value=true;
+  try{
+    const result=await api(`sessions/${id}/edit`,draft,{signal:AbortSignal.timeout(10000)});
+    pendingEdits.value.delete(id);
+    if(selected.value!==id||version!==selectionGeneration)return false;
+    edit.value=result;
+    return true;
+  }catch(error){
+    if(error.status===409){
+      try{
+        const {edit:latest}=await api(`sessions/${id}`,undefined,{signal:AbortSignal.timeout(8000)});
+        const same=(a,b)=>JSON.stringify(a??[])===JSON.stringify(b??[]);
+        if(latest.revision===draft.revision+1&&['ranges','excluded','highlighted','undo'].every(key=>same(latest[key],draft[key]))&&
+          messageEditsKey(latest.messageEdits)===messageEditsKey(draft.messageEdits)){
+          pendingEdits.value.delete(id);
+          if(selected.value!==id||version!==selectionGeneration)return false;
+          edit.value=latest;return true;
+        }
+      }catch{/* Keep the draft until the service can confirm the save. */}
+    }
+    tell(error.message);
+    return false;
+  }finally{saving.value=false;}
+}
 async function addRoom(){
   if(addingRoom.value||modal.value||!roomUrl.value.trim())return;const entered=roomUrl.value.trim();addingRoom.value=true;
   try{
@@ -631,7 +777,7 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
   <div class="app-shell">
     <header class="topbar">
       <div class="brand"><img class="brand-icon" :src="appIcon" alt="" width="30" height="30"/><strong>{{ ui.workbench.菜播录包机 }}</strong></div>
-      <div class="top-actions"><button v-if="selected" class="button subtle panel-toggle" :aria-label="ui.workbench.切换弹幕栏" @keydown.stop :aria-expanded="danmakuVisible" aria-controls="danmaku-panel" :title="ui.workbench.展开或收起弹幕列表" @click="danmakuPreference=!danmakuVisible"><Radio :size="16"/><span>{{ ui.workbench.弹幕 }}</span></button><RecorderStatus :recorder="state.recorder" :rooms="state.rooms" :anchors="state.anchors" :connected="connected" :label="coreStatus"/><button class="button subtle" @click="openSettings"><Settings :size="16"/><span>{{ ui.workbench.设置 }}</span></button></div>
+      <div class="top-actions"><button v-if="selected" class="button subtle panel-toggle" :aria-label="ui.workbench.切换弹幕栏" @keydown.stop :aria-expanded="danmakuVisible" aria-controls="danmaku-panel" :title="ui.workbench.展开或收起弹幕列表" @click="danmakuPreference=!danmakuVisible"><Radio :size="16"/><span>{{ ui.workbench.弹幕 }}</span></button><WorkbenchThemePicker :theme="workbenchTheme" :saving="!!choosingTheme" @select="setWorkbenchTheme"/><RecorderStatus :recorder="state.recorder" :rooms="state.rooms" :anchors="state.anchors" :connected="connected" :label="coreStatus"/><button class="button subtle workbench-settings-trigger" @click="openSettings"><Settings :size="16"/><span>{{ ui.workbench.设置 }}</span></button></div>
     </header>
     <div class="notification-stack">
     <DismissibleNotice v-if="state.updates?.candidate&&(state.updates.status==='downloading'||state.updates.autoInstall)" v-show="!modal" class="update-reminder" :aria-label="ui.workbench.更新进度" :close-label="ui.workbench.关闭更新进度" :key="state.updates.candidate.key"><div><strong>{{ state.updates.status==='downloading'?ui.workbench.正在下载更新:ui.workbench.更新已准备好 }}</strong><p>{{ state.updates.candidate.version }} · {{ state.updates.status==='downloading'?ui.workbench.下载完成并校验后再安装:state.updates.installBlocked||ui.workbench.将在空闲时更新并重新打开 }}</p></div><button class="button small" @click="openUpdateSettings">{{ ui.workbench.查看进度 }}</button></DismissibleNotice>
@@ -647,10 +793,12 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
         </section>
         <section class="recording-section"><div class="section-heading"><h2><Film :size="17"/>{{ ui.workbench.录像素材 }}</h2></div>
           <div v-if="!state.sessions.length" class="rail-empty">{{ ui.workbench.暂无录像素材 }}</div>
-          <div v-for="session in state.sessions" :key="session.id" class="session-item" :class="{selected:selected===session.id}" @contextmenu.prevent="showContext($event,session)" @keydown.shift.f10.prevent="showContext($event,session)" @keydown.context-menu.prevent="showContext($event,session)" ><button type="button" class="session-select" :aria-pressed="selected===session.id" @click="choose(session.id)" :title="selected===session.id?ui.workbench.再次点击取消选中右键管理素材:ui.workbench.点击选择素材右键管理素材"><PlatformBadge v-if="session.platform&&session.platform!=='unknown'" :platform="session.platform" compact/><Film v-else :size="20"/><span><strong :title="session.title||session.hostName">{{ session.title||session.hostName }}</strong><small v-if="session.captureKinds?.length||session.hostName" class="session-origin"><span v-for="kind in session.captureKinds?.length?session.captureKinds:['self']" :key="kind" class="session-origin-group" :title="materialPeople(session,kind)"><span class="session-origin-kind">{{ kind==='guest'?ui.workbench.连麦:ui.workbench.直播 }}</span><span v-if="materialPeople(session,kind)" class="session-origin-name">{{ materialPeople(session,kind) }}</span></span></small><small>{{ date(session.created) }}</small><span class="session-meta"><i v-if="session.status==='recording'" class="live-dot online"/>{{ statusText(session.status) }} · {{ format(session.duration) }}</span></span></button><button type="button" class="icon-button session-more" :aria-label="ui.workbench.素材操作" :title="ui.workbench.素材操作" aria-haspopup="menu" :aria-expanded="sessionMenu?.session.id===session.id" @keydown.stop @click.stop="showContext($event,session)"><MoreHorizontal :size="16"/></button></div>
+          <div v-for="session in materialSessions" :key="session.id" class="session-item" :class="{selected:selected===session.id}" @contextmenu.prevent="showContext($event,session)" @keydown.shift.f10.prevent="showContext($event,session)" @keydown.context-menu.prevent="showContext($event,session)" ><button type="button" class="session-select" :aria-pressed="selected===session.id" @click="choose(session.id)" :title="selected===session.id?ui.workbench.再次点击取消选中右键管理素材:ui.workbench.点击选择素材右键管理素材"><PlatformBadge v-if="session.platform&&session.platform!=='unknown'" :platform="session.platform" compact/><Film v-else :size="20"/><span><strong :title="session.title||session.hostName">{{ session.title||session.hostName }}</strong><small v-if="session.captureKinds?.length||session.hostName" class="session-origin"><span v-for="kind in session.captureKinds?.length?session.captureKinds:['self']" :key="kind" class="session-origin-group" :title="materialPeople(session,kind)"><span class="session-origin-kind">{{ kind==='guest'?ui.workbench.连麦:ui.workbench.直播 }}</span><span v-if="materialPeople(session,kind)" class="session-origin-name">{{ materialPeople(session,kind) }}</span></span></small><small>{{ date(session.created) }}</small><span class="session-meta"><i v-if="session.status==='recording'" class="live-dot online"/>{{ statusText(session.status) }} · {{ format(session.duration) }}</span></span></button><button type="button" class="icon-button session-more" :aria-label="ui.workbench.素材操作" :title="ui.workbench.素材操作" aria-haspopup="menu" :aria-expanded="sessionMenu?.session.id===session.id" @keydown.stop @click.stop="showContext($event,session)"><MoreHorizontal :size="16"/></button></div>
+          <button v-if="state.sessions.length===200&&!noMoreSessions" type="button" class="button small subtle" :disabled="loadingOlder" @click="loadOlderSessions">{{ ui.workbench.加载更早素材 }}</button>
         </section>
       </aside>
       <main class="editor" :class="{'editor-empty':!selected}">
+        <div v-if="detailError" role="status" class="editor-heading"><span>{{ detailError }}</span><button type="button" class="button small" @click="refreshDetail(true)">{{ ui.workbench.重新加载素材 }}</button></div>
         <div class="editor-preview">
         <div class="editor-heading"><div><h1 v-if="selected">{{ activeSession?.hostName||activeSession?.title }}</h1><span v-if="activeSession?.status==='recording'" class="recording-label"><i class="live-dot online"/>{{ ui.common.录制中 }}</span></div></div>
         <div v-if="activeSession?.error" class="inline-warning"><AlertCircle :size="16"/><span>{{ activeSession.error }}</span></div>
@@ -684,7 +832,7 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
           </div></div>
           <div class="ruler"><span v-for="n in 5" :key="n" :class="{'ruler-quarter':n===2||n===4}">{{ format(viewport.from+(viewport.to-viewport.from)*(n-1)/4) }}</span></div>
           <div id="timeline-tracks" class="timeline-tracks"><div class="timeline"><div class="timeline-track"/>
-            <TimelineSignals kind="audio" :audio="signals?.audio" :from="viewport.from" :to="viewport.to" :data-from="signals?.from??viewport.from" :data-to="signals?.to??viewport.to" :selected="selectionReady" :loading="signalsLoading" :error="signalsError"/>
+            <TimelineSignals kind="audio" :theme="workbenchTheme" :audio="signals?.audio" :from="viewport.from" :to="viewport.to" :data-from="signals?.from??viewport.from" :data-to="signals?.to??viewport.to" :selected="selectionReady" :loading="signalsLoading" :error="signalsError"/>
             <div v-for="{gap,view} in visibleGaps" :key="gap.start" class="recording-gap" :style="rangeStyle(view)" :aria-label="ui.workbench.录制空档+format(gap.start)+ui.workbench.至+format(gap.end)"/>
             <div v-if="draftView" class="draft-range" :style="rangeStyle(draftView)"/>
             <TimelineMarker v-if="inViewport(draftStart)||activeMarker==='start'" kind="start" :pending="!marksComplete" :duration="duration" @pan="panTimeline" :time="draftStart" :from="viewport.from" :to="viewport.to" :min="0" :max="draftEnd!==null&&draftEnd>0?draftEnd-.001:duration" :fps="fps" :disabled="!canPreview||saving" @change="dragMark('start',$event)" @commit="previewMark" @start="timelineDragging=true;activeMarker='start';timelineAutoFollow=false" @end="endTimelineDrag"/>
@@ -693,7 +841,7 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
             <div v-if="inViewport(position)" class="playhead" :style="{left:timelinePercent(position)+'%'}"/>
             <TimelineScrubber :from="viewport.from" :to="viewport.to" :duration="duration" :time="position" :disabled="!canPreview" @start="startPlaybackScrub" @change="movePlaybackScrub" @commit="playFrom($event,isPlaying)" @pan="panTimeline" @end="finishPlaybackScrub"/>
           </div>
-          <TimelineSignals kind="density" :density="signals?.density" :from="viewport.from" :to="viewport.to" :data-from="signals?.from??viewport.from" :data-to="signals?.to??viewport.to" :position="position" :selected="selectionReady" :loading="signalsLoading" :error="signalsError" :disabled="!canPreview" @seek="playFrom($event,isPlaying)"/>
+          <TimelineSignals kind="density" :theme="workbenchTheme" :density="signals?.density" :from="viewport.from" :to="viewport.to" :data-from="signals?.from??viewport.from" :data-to="signals?.to??viewport.to" :position="position" :selected="selectionReady" :loading="signalsLoading" :error="signalsError" :disabled="!canPreview" @seek="playFrom($event,isPlaying)"/>
           </div>
           <TimelineNavigator :key="selected||'empty'" :duration="duration" :from="viewport.from" :to="viewport.to" :disabled="!canPreview" @pan="panTimeline" @start="timelineDragging=true" @end="endTimelineDrag"/>
           <div v-if="startMarked||endMarked" class="marker-summary" aria-live="polite">
@@ -725,14 +873,15 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
               <p v-if="job.error" class="job-error">{{ job.error }}</p><p v-if="jobRetryErrors[job.id]&&jobRetryErrors[job.id]!==job.error&&job.status==='save_failed'" class="job-error" role="alert">{{ jobRetryErrors[job.id] }}</p>
               <p v-if="job.file" class="output-path" :title="job.file">{{ job.mode==='danmaku'?ui.workbench.弹幕版弹幕版:ui.workbench.纯净版纯净版 }}{{ job.file }}</p><p v-if="job.mode==='dual'" class="output-path" :title="job.danmaku_file">{{ ui.workbench.弹幕版弹幕版 }}{{ job.danmaku_file }}</p>
               <div v-if="job.status==='save_failed'" class="job-save-actions" @keydown.stop><button class="text-button" :disabled="!!retrySaveReason(job)" @click="retryJobSave(job)"><LoaderCircle v-if="retrySavingIds.includes(job.id)" class="spin" :size="14"/><RotateCcw v-else :size="14"/>{{ ui.workbench.重试保存 }}</button><button class="text-button" :disabled="!!retrySaveReason(job)" @click="openRetrySave(job)"><FolderOpen :size="14"/>{{ ui.workbench.更换保存位置更换保存位置 }}</button></div>
+              <button v-if="job.status==='save_failed'" type="button" class="text-button" :disabled="retryExportIds.includes(job.id)||retrySavingIds.includes(job.id)" @click="abandonExport(job)">{{ ui.workbench.放弃这次导出 }}</button>
               <p v-if="job.status==='save_failed'&&job.canRetrySave!==true" class="job-save-hint">{{ retrySaveReason(job) }}</p>
               <p v-if="job.hasProcessingRecovery&&['failed','interrupted'].includes(job.status)" class="job-save-hint">{{ job.savedExportSteps>0?ui.workbench.导出步骤可复用(job.savedExportSteps):ui.workbench.导出恢复说明 }}</p>
-              <div v-if="job.canRetryExport" class="job-save-actions" @keydown.stop><button class="text-button" :disabled="retryExportIds.includes(job.id)" @click="retryExportJob(job)"><RotateCcw :size="14"/>{{ job.hasProcessingRecovery?ui.workbench.继续导出:ui.workbench.重试导出 }}</button></div>
+              <div v-if="job.canRetryExport" class="job-save-actions" @keydown.stop><button class="text-button" :disabled="retryExportIds.includes(job.id)" @click="retryExportJob(job)"><RotateCcw :size="14"/>{{ job.status==='save_failed'?ui.workbench.从原素材重新导出:job.hasProcessingRecovery?ui.workbench.继续导出:ui.workbench.重试导出 }}</button></div>
               <p v-if="job.automaticRetries>0&&job.status==='running'" class="job-save-hint">{{ ui.workbench.已尝试自动恢复 }} {{ job.automaticRetries }} {{ ui.workbench.次 }}</p>
               <div v-if="job.hasRetainedFiles&&['failed','interrupted','save_failed'].includes(job.status)" class="job-save-actions" @keydown.stop><button class="text-button" @click="openFolder({recoveryJobId:job.id})"><FolderOpen :size="14"/>{{ ui.workbench.查看暂存文件 }}</button></div>
               <div v-if="job.status==='done'" class="download-links" @keydown.stop><button class="text-button" @click="openFolder({jobId:job.id})"><FolderOpen :size="14"/>{{ ui.workbench.打开文件夹 }}</button></div>
             </div>
-          </section></div>
+          <button v-if="jobHistoryCursor" type="button" class="button subtle small" :disabled="loadingJobHistory" @click="loadJobHistory">{{ ui.workbench.加载更早导出记录 }}</button></section></div>
         <div v-if="activeSession" class="archive-line"><button class="text-button" :title="ui.workbench.打开完整素材导出目录" @click="openFolder({kind:'full'})"><FolderOpen :size="16"/>{{ ui.workbench.完整素材 }}</button></div>
         <section v-if="activeSession" class="preparation-panel" :class="{'is-expanded':preparationExpanded}" :aria-label="ui.workbench.后台预处理" :data-preparation-status="selectedPreparation?.status||'none'">
           <div class="preparation-summary"><span class="preparation-state" role="status"><LoaderCircle v-if="selectedLivePreparation?.active||activeSession.status==='finished'&&selectedPreparation?.status==='preparing'" class="spin" :size="14"/><Check v-else-if="selectedPreparation?.status==='ready'" :size="14"/><span>{{ selectedLivePreparation?.label||(activeSession.status==='finished'?preparationStatus(selectedPreparation):ui.workbench.录制完成后可预处理) }}</span></span><span v-if="preparationExpanded&&selectedPreparation?.totalSeconds>0&&selectedPreparation?.status!=='exported'" class="preparation-duration">{{ format(Math.min(selectedPreparation.preparedSeconds||0,selectedPreparation.totalSeconds)) }} / {{ format(selectedPreparation.totalSeconds) }}</span><span v-if="preparationExpanded&&selectedPreparation?.bytes>0" class="preparation-space">{{ ui.workbench.缓存 }} {{ formatBytes(selectedPreparation.bytes) }}</span><div v-if="preparationExpanded&&selectedPreparationAction&&activeSession.status==='finished'" class="preparation-actions" @keydown.stop><button class="text-button" :disabled="!!selectedPreparationBlock" :title="selectedPreparationBlock" @click="actPreparation(activeSession)"><LoaderCircle v-if="preparationBusyIds.includes(activeSession.id)" class="spin" :size="14"/><Pause v-else-if="selectedPreparationAction==='pause'" :size="14"/><RotateCcw v-else-if="selectedPreparation?.status==='error'" :size="14"/><Play v-else :size="14"/>{{ preparationActionLabel(selectedPreparation) }}</button></div></div>
@@ -828,7 +977,7 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
         <div v-if="edit.excluded.length" class="danmaku-footer">{{ ui.workbench.已排除 }} {{ edit.excluded.length }} {{ ui.common.条 }}</div>
       </aside>
     </div>
-    <footer class="statusbar"><button type="button" class="statusbar-contact" aria-haspopup="dialog" @click="openAbout">{{ ui.workbench.联系我们 }}</button><span v-if="saving||selected">{{ saving?ui.workbench.正在保存剪辑:ui.workbench.剪辑自动保存 }}</span></footer>
+    <footer class="statusbar"><button type="button" class="statusbar-contact" aria-haspopup="dialog" @click="openAbout">{{ ui.workbench.联系我们 }}</button><span v-if="saving||selected">{{ saving?ui.workbench.正在保存剪辑:unsavedEdit?ui.workbench.有未保存剪辑:ui.workbench.剪辑自动保存 }}</span><button v-if="unsavedEdit&&!saving" type="button" class="text-button" @click="save">{{ ui.workbench.重试保存剪辑 }}</button></footer>
     <DismissibleNotice v-if="notice" :key="noticeSequence" class="toast" @dismiss="notice=''" :class="noticeKind" role="status"><Check v-if="noticeKind==='success'" :size="18"/><AlertCircle v-else :size="18"/><span>{{ notice }}</span></DismissibleNotice>
     <div v-if="messageMenu" class="session-context message-context" role="menu" :aria-label="ui.workbench.记录操作" :style="{left:messageMenu.x+'px',top:messageMenu.y+'px'}" @pointerdown.stop @keydown.up.prevent="messageMenuKey" @keydown.down.prevent="messageMenuKey"><template v-if="messageMenu.message.type==='lottery'"><button role="menuitem" @click="openLottery(messageMenu.message)"><Trophy :size="16"/>{{ ui.workbench.查看中奖名单 }}</button><button role="menuitem" @click="openLottery(messageMenu.message,true)"><Pencil :size="16"/>{{ ui.workbench.编辑奖品备注 }}</button></template><template v-else><template v-if="messageMenu.message.type==='d'"><button role="menuitem" :disabled="!senderFilterFor(messageMenu.message)" :title="senderFilterFor(messageMenu.message)?'':ui.workbench.这条弹幕没有可区分的发送者信息" @click="filterSender(messageMenu.message)"><Search :size="16"/>{{ ui.workbench.只看此人弹幕 }}</button><button role="menuitem" :disabled="saving" @click="openMessageEditor(messageMenu.message)"><Pencil :size="16"/>{{ ui.workbench.编辑文本 }}</button><button role="menuitem" :disabled="saving" @click="toggleHighlight(messageMenu.message)"><span aria-hidden="true">✦</span>{{ highlighted.has(messageMenu.message.id)?ui.workbench.取消突出显示:ui.workbench.突出显示此条弹幕 }}</button></template><button role="menuitem" :disabled="saving" @click="toggleMessage(messageMenu.message);closeContext()"><Trash2 :size="16"/>{{ excluded.has(messageMenu.message.id)?ui.workbench.恢复此条弹幕:ui.workbench.从剪辑中排除此条 }}</button></template></div>
     <div v-if="sessionMenu" class="session-context" role="menu" :aria-label="ui.workbench.素材操作" :style="{left:sessionMenu.x+'px',top:sessionMenu.y+'px'}" @pointerdown.stop><button role="menuitem" :disabled="!!fullExportBlock(sessionMenu.session)" :title="fullExportBlock(sessionMenu.session)" @click="openFullExport(sessionMenu.session)"><Download :size="16"/>{{ ui.workbench.导出完整素材 }}</button><p v-if="fullExportBlock(sessionMenu.session)" class="context-hint">{{ fullExportBlock(sessionMenu.session) }}</p><button role="menuitem" :disabled="!!preparationActionBlock(sessionMenu.session)" :title="preparationActionBlock(sessionMenu.session)" @click="actPreparation(sessionMenu.session)"><Pause v-if="preparationAction(preparationFor(sessionMenu.session.id))==='pause'" :size="16"/><Check v-else-if="preparationFor(sessionMenu.session.id)?.status==='ready'" :size="16"/><Play v-else :size="16"/>{{ preparationActionLabel(preparationFor(sessionMenu.session.id),true) }}</button><p v-if="!preparationEnabled&&preparationAction(preparationFor(sessionMenu.session.id))!=='pause'" class="context-hint">{{ ui.workbench.请在设置中开启后台预处理 }}</p><button role="menuitem" class="context-danger" @click="requestDelete(sessionMenu.session)"><Trash2 :size="16"/>{{ ui.workbench.删除素材 }}</button></div>
@@ -845,8 +994,8 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
         <template v-if="modal==='remove-room'"><p>{{ ui.workbench.确认移除 }}{{ confirmTarget.name||ui.workbench.这位主播 }}{{ ui.workbench.的监控 }}</p><p>{{ ui.workbench.移除主播影响 }}</p></template>
         <template v-else-if="modal==='delete-job'">
           <p class="confirm-meta">{{ jobDeleteTarget?jobDescription(jobDeleteTarget):'' }}</p>
-          <label class="checkbox"><input type="checkbox" v-model="jobDeleteRecordOnly" :disabled="modalBusy"/>{{ ui.workbench.仅移除任务记录保留现有文件 }}</label>
-          <p v-if="jobDeleteRecordOnly">{{ ui.workbench.移除导出记录确认 }}</p><p v-else>{{ ui.workbench.永久删除导出确认 }}</p><p class="muted">{{ ui.workbench.原始录像原始弹幕和剪辑选段保留 }}</p>
+          <label v-if="!abandonSave" class="checkbox"><input type="checkbox" v-model="jobDeleteRecordOnly" :disabled="modalBusy"/>{{ ui.workbench.仅移除任务记录保留现有文件 }}</label>
+          <p v-if="abandonSave">{{ ui.workbench.确认放弃导出 }}</p><p v-else-if="jobDeleteRecordOnly">{{ ui.workbench.移除导出记录确认 }}</p><p v-else>{{ ui.workbench.永久删除导出确认 }}</p><p class="muted">{{ ui.workbench.原始录像原始弹幕和剪辑选段保留 }}</p>
           <p v-if="jobPreviewLoading&&!jobDeleteRecordOnly" class="job-delete-loading" role="status"><LoaderCircle class="spin" :size="16"/>{{ ui.workbench.正在核对导出文件 }}</p>
           <template v-if="jobDeletePreview&&!jobDeleteRecordOnly"><ul v-if="jobDeletePreview.files.length" class="job-delete-files" :aria-label="ui.workbench.将删除的导出文件"><li v-for="file in jobDeletePreview.files" :key="file.path"><code>{{ file.path }}</code><span>{{ file.exists===false?ui.workbench.文件已不存在仅清理对应记录:Number.isFinite(file.size)?formatBytes(file.size):ui.workbench.将永久删除 }}</span></li></ul><p v-else-if="!jobDeletePreview.blocked" class="muted">{{ ui.workbench.无成片仅清理记录 }}</p></template>
           <p v-if="jobDeleteError" class="inline-warning" role="alert">{{ jobDeleteError }}</p>
@@ -888,7 +1037,8 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
             <div class="directory-settings"><label class="field-label">{{ ui.workbench.默认导出根目录 }}<div class="path-picker"><input v-model="exportDirectory" :aria-label="ui.workbench.默认导出文件夹" :placeholder="ui.workbench.填写完整的文件夹路径" :disabled="modalBusy" @change="commitExportDirectory" @keydown.enter.prevent="commitExportDirectory"/><button v-if="isDesktop" type="button" class="button" :disabled="modalBusy" @click="browseFolder"><FolderOpen :size="16"/>{{ ui.workbench.选择 }}</button></div></label><p class="muted">{{ ui.workbench.导出目录说明 }}</p><div class="export-destinations"><span>{{ ui.workbench.完整素材 }}</span><code>{{ categoryPath(exportDirectory,'完整素材') }}</code><span>{{ ui.workbench.导出片段 }}</span><code>{{ categoryPath(exportDirectory,'导出片段') }}</code></div><div class="directory-actions"><button class="button" type="button" @click="openFolder({kind:'exports'})"><FolderOpen :size="16"/>{{ ui.workbench.打开文件目录 }}</button></div></div>
             <div v-if="state.recovery?.safeMode" class="setting-info"><span>{{ ui.workbench.安全启动前的旧录像已保留 }}</span><code>{{ state.paths?.retained }}</code><button class="button" @click="openFolder({kind:'retained'})"><FolderOpen :size="16"/>{{ ui.workbench.查看旧录像 }}</button><p class="muted">{{ ui.workbench.旧素材索引异常 }}</p></div>
             <div class="setting-info"><span>{{ ui.workbench.完整原始录像与弹幕 }}</span><code>{{ state.paths?.originals }}</code><button class="text-button" @click="openFolder({kind:'originals'})">{{ ui.workbench.打开原始素材文件夹 }}</button></div>
-            <section v-if="pendingCleanup.length" class="cleanup-settings" :aria-label="ui.workbench.素材清理进度"><strong>{{ ui.workbench.素材清理进度素材清理进度 }}{{ pendingCleanup.length }}）</strong><p class="muted">{{ ui.workbench.文件占用释放后自动重试 }}</p><div v-for="item in pendingCleanup" :key="item.id" class="cleanup-row"><div><strong>{{ item.title }}</strong><small>{{ date(item.created) }} · {{ format(item.duration) }}</small><p role="status">{{ cleanupLabel(item) }}</p><small v-if="item.task?.detail">{{ item.task.detail }}</small><p v-if="item.purge_error&&!item.task" class="cleanup-error">{{ item.purge_error }}</p></div><button class="button small danger" :disabled="modalBusy||!!item.task" @click="requestDelete(item)">{{ item.task?ui.workbench.清理中:ui.workbench.重试清理 }}</button></div></section>
+            <section v-if="pendingCleanup.length" class="cleanup-settings" :aria-label="ui.workbench.素材清理进度"><strong>{{ ui.workbench.素材清理进度素材清理进度 }}{{ pendingCleanup.length }}）</strong><p class="muted">{{ ui.workbench.文件占用释放后自动重试 }}</p><div v-for="item in pendingCleanup" :key="item.id" class="cleanup-row"><div><strong>{{ item.title }}</strong><small>{{ date(item.created) }} · {{ format(item.duration) }}</small><p role="status">{{ cleanupLabel(item) }}</p><small v-if="item.task?.detail">{{ item.task.detail }}</small><p v-if="item.purge_error&&!item.task" class="cleanup-error">{{ item.purge_error }}</p></div><button class="button small danger" :disabled="!!item.task||cleanupRequests.has(item.id)" @click="retryCleanup(item)">{{ item.task?ui.workbench.清理中:ui.workbench.重试清理 }}</button><div v-if="item.canKeep&&!item.task"><details><summary>{{ ui.workbench.查看保留位置 }}</summary><p v-for="entry in item.retained" :key="entry.path"><code>{{ entry.path }}</code></p></details><button type="button" class="button small" :disabled="cleanupRequests.has(item.id)" @click="retryCleanup(item,true)">{{ ui.workbench.保留文件并结束清理 }}</button></div></div></section>
+            <details v-if="state.retainedCleanup?.length" class="cleanup-settings"><summary>{{ ui.workbench.已保留的清理文件 }}</summary><div v-for="item in state.retainedCleanup" :key="item.session"><strong>{{ item.title }}</strong><p v-for="entry in item.retained" :key="entry.path"><code>{{ entry.path }}</code></p></div></details>
           </SettingsGroup>
           <SettingsGroup name="advanced" :title="ui.workbench.设置高级" v-model:open="expandedSettings.advanced">
             <section class="preparation-settings" :aria-label="ui.workbench.自动预处理设置">

@@ -118,7 +118,7 @@ async function protectedPaths(store, id) {
 }
 
 export class JobDeletion {
-  constructor(store) { this.store = store; this.previews = new Map(); this.deleting = new Set(); store.deletingJobs=this.deleting; }
+  constructor(store, media) { this.store = store; this.media=media; this.previews = new Map(); this.deleting = new Set(); store.deletingJobs=this.deleting; }
   job(id) { return this.store.get('SELECT * FROM jobs WHERE id=?', id); }
   assertCurrent(plan) {
     const current = this.job(plan.id); assertInactive(current);
@@ -165,12 +165,14 @@ export class JobDeletion {
     if (this.deleting.has(id)) throw new Error('此导出任务正在删除，请稍候。');
     this.deleting.add(id); let deletedFiles = 0, freedBytes = 0;
     try {
-      assertInactive(this.job(id));
+      const canAbandon=()=>input.recordOnly===true&&input.abandonSave===true&&this.job(id)?.status==='save_failed'
+        &&!this.media?.retrying?.has(id)&&!this.media?.saves?.has(id);
+      if(!canAbandon())assertInactive(this.job(id));
       // Explicit history-only removal has no dependency on path validation or
       // file access. Never fall back to it implicitly after an unlink failure.
       if (input.recordOnly === true) {
         this.store.transaction(() => {
-          assertInactive(this.job(id));
+          if(!canAbandon())assertInactive(this.job(id));
           this.store.run('DELETE FROM jobs WHERE id=?', id);
         });
         this.previews.delete(id);

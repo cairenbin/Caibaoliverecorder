@@ -1,3 +1,4 @@
+import {jobSummaries} from './workbench-snapshot.js';
 import { json, body } from './http-response.js';
 import {messageFeed} from './message-feed.js';
 import {giftMessages} from './gifts.js';
@@ -11,6 +12,18 @@ import { lotteryMessages, lotteryRecord, saveLotteryNote } from './lottery-recor
 // continue through the existing authenticated request pipeline.
 export async function handleMaterialRoutes({req,res,url,p},{store,media,preparation,deletingSessions,deleteMaterial,recorder,jobDeletion,waveform,density,linkmic}) {
   let match;
+  if(p==='/api/sessions'&&req.method==='GET'){
+    const created=url.searchParams.get('before'),id=url.searchParams.get('id');
+    if(!created||!id||created.length>64||!/^[-\w]{1,100}$/.test(id))return json(res,{error:'素材分页位置无效。'},400);
+    return json(res,{sessions:recorder.materialOrigins(store.sessions({created,id}))});
+  }
+  if((match=/^\/api\/sessions\/([\w-]+)\/export-history$/.exec(p))&&req.method==='GET'){
+    const id=match[1],cursor=Number(url.searchParams.get('before')||0);
+    if(!Number.isSafeInteger(cursor)||cursor<0)return json(res,{error:'导出历史位置无效。'},400);
+    if(!store.session(id))return json(res,{error:'录像不存在。'},404);
+    const rows=store.all("SELECT rowid AS seq,* FROM jobs WHERE session=? AND status IN ('done','cancelled','canceled') AND (?=0 OR rowid<?) ORDER BY rowid DESC LIMIT 100",id,cursor,cursor);
+    return json(res,{jobs:jobSummaries(store,rows),next:rows.length===100?rows.at(-1).seq:0});
+  }
   if((match=/^\/api\/sessions\/([\w-]+)$/.exec(p))&&req.method==='GET'){
     const session=store.session(match[1]);if(!session)return json(res,{error:'录像不存在。'},404);
     const sources=store.sources(session.id).map(s=>({id:s.id,start:s.start,wall:s.wall,duration:s.duration,closed:s.closed,error:s.error,path:s.path,metadata:store.setting('metadata:'+s.id)}));
@@ -35,6 +48,10 @@ export async function handleMaterialRoutes({req,res,url,p},{store,media,preparat
     const visibility=edit=>JSON.stringify([edit.filterLottery!==false,[...edit.excluded].sort(),[...(edit.highlighted||[])].sort(),messageEditsKey(edit.messageEdits)]);
     if(visibility(previous)!==visibility(saved))await preparation.invalidate(id);
     return json(res,saved);
+  }
+  if((match=/^\/api\/sessions\/([\w-]+)\/retry-cleanup$/.exec(p))&&req.method==='POST'){
+    const input=await body(req);
+    return json(res,deletingSessions.start(match[1],{retry:true,keepRetained:input.keepRetained===true}).accepted,202);
   }
   if((match=/^\/api\/sessions\/([\w-]+)\/delete$/.exec(p))&&req.method==='POST'){
     const input=await body(req),id=match[1];

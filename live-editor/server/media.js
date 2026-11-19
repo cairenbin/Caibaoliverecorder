@@ -500,23 +500,65 @@ export class Media {
     if(this.closed)throw new Error('视频服务已关闭。');
     if(this.store.deletingJobs?.has(id))throw new Error('该任务正在删除，请等待完成。');
     const row=this.store.get('SELECT * FROM jobs WHERE id=?',id);
-    if(!row||!['failed','interrupted'].includes(row.status)||this.exportOperations.has(id))throw new Error('该任务当前不能重试导出。');
+    if(!row||!['failed','interrupted','save_failed'].includes(row.status)||this.exportOperations.has(id)||this.retrying.has(id)||this.saves.has(id))throw new Error('该任务当前不能重试导出。');
     const job=this.store.jobDetails(row);if(job.recoveryInvalid)throw new Error('任务记录损坏，请重新创建导出。');
     this.assertSessionAvailable(job.session);
     const pending=await this.publication.recoverStage(job);
-    if(pending){job.pendingPublication=pending;job.canRetrySave=true;this.store.run("UPDATE jobs SET status='save_failed',data=?,error='成片已完成，请重试保存。' WHERE id=?",JSON.stringify(job),id);return {ok:true,status:'save_failed'};}
+    const stageMissing=row.status==='save_failed'&&pending&&await this.publication.stageFilesMissing(job,pending);
     // Recheck after async filesystem validation: a second request may already
     // have claimed this job, or a deletion may have removed the material.
     this.assertSessionAvailable(job.session);
     if(this.store.deletingJobs?.has(id))throw new Error('该任务正在删除，请等待完成。');
-    if(!['failed','interrupted'].includes(this.store.get('SELECT status FROM jobs WHERE id=?',id)?.status))throw new Error('任务已开始恢复，请等待完成。');
+    if(!['failed','interrupted','save_failed'].includes(this.store.get('SELECT status FROM jobs WHERE id=?',id)?.status))throw new Error('任务已开始恢复，请等待完成。');
+    if (this.retrying.has(id)||this.saves.has(id)||this.store.get('SELECT data FROM jobs WHERE id=?',id)?.data!==row.data) throw new Error('任务已开始恢复，请等待完成。');
+    if(pending&&!stageMissing){job.pendingPublication=pending;job.canRetrySave=true;this.store.run("UPDATE jobs SET status='save_failed',data=?,error='成片已完成，请重试保存。' WHERE id=?",JSON.stringify(job),id);return {ok:true,status:'save_failed'};}
+    if (row.status==='save_failed') {
+      if (await this.publication.verifyPublished(job)) {
+        if (this.store.get('SELECT data FROM jobs WHERE id=?',id)?.data!==row.data || this.retrying.has(id)||this.saves.has(id)) throw new Error('任务已开始恢复，请等待完成。');
+        this.completeSave(job);
+        return {ok:true,status:'done'};
+      }
+      await this.publication.assertRecoveryStorage(job);
+      // Preserve staged folders unless their manifest proves the files are gone.
+      for (const directory of new Set([job.pendingPublication?.directory,job.processingRecovery?.directory].filter(Boolean))) {
+        if(stageMissing&&directory===pending.directory)continue;
+        try { await this.publication.checkDirectory(directory); }
+        catch(error) { if(error.code==='ENOENT') continue; throw error; }
+        throw new Error('暂存目录仍在，已保留其中的文件，请检查后再试。');
+      }
+      this.assertSessionAvailable(job.session);
+      const sources=this.store.sources(job.session);
+      if(!sources.length)throw new Error('原素材不可用，无法重新导出。');
+      // A readable original or current storage mapping must still exist.
+      for(const source of sources) {
+        const files=source.closed===2?[source.path,...this.store.all('SELECT path FROM chunks WHERE source=?',source.id).map(item=>item.path)]:[source.path];
+        let readable=false;
+        for(const file of files){
+          try { await fs.access(file); readable=true; break; }
+          catch(error) { if(error.code!=='ENOENT')throw error; }
+        }
+        if(!readable)throw new Error('原素材不可用，无法重新导出。');
+      }
+      const next=await this.reserveOutput(job,this.store.session(job.session),sources);
+      const current=this.store.get('SELECT status,data FROM jobs WHERE id=?',id);
+      if(this.closed||this.store.deletingJobs?.has(id)||this.retrying.has(id)||this.saves.has(id)||current?.status!==row.status||current.data!==row.data){
+        await this.releaseReservation({...job,output:next});
+        throw new Error('任务已开始恢复，请等待完成。');
+      }
+      job.output={...next,namingVersion:2,sidecars:false};
+      if(job.mode!=='clean')job.output.danmakuFile=clipFile(job.output.file,'danmaku');
+      delete job.pendingPublication;
+      delete job.processingRecovery;
+      delete job.publishedFiles;
+      delete job.canRetrySave;
+    }
     job.recoveryAttempts=0;job.automaticRetries=0;job.resumeOnLaunch=true;job.resumedExportSteps=0;
-    this.store.run("UPDATE jobs SET status='queued',error='',data=? WHERE id=?",JSON.stringify(job),id);
+    this.store.run("UPDATE jobs SET status='queued',error='',progress=0,data=?,file=? WHERE id=?",JSON.stringify(job),job.mode==='danmaku'?job.output?.danmakuFile||row.file:job.output?.file||row.file,id);
     void this.work();return {ok:true,status:'queued'};
   }
   async retrySaveInternal(id,input={}) {
     if(this.closed)throw new Error('视频服务已关闭。');
-    if(this.retrying.has(id)||this.saves.has(id))throw new Error('这个任务正在保存，请稍候。');
+    if(this.store.deletingJobs?.has(id)||this.retrying.has(id)||this.saves.has(id))throw new Error('这个任务正在处理，请稍候。');
     const row=this.store.get('SELECT * FROM jobs WHERE id=?',id);
     if(!row||row.status!=='save_failed')throw new Error('这个任务没有可以重试保存的视频。');
     const job=JSON.parse(row.data);this.assertSessionAvailable(job.session);

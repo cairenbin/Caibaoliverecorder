@@ -25,7 +25,11 @@ const matchIdentity = (stat, identity) => stat && ['dev', 'ino', 'size', 'mtimeN
 // Retain the inode, device, size and content-write-time guards, plus the path,
 // link-count and manifest checks below. Playback/cache hits stay strict.
 const matchRemovalIdentity = (stat, identity) => stat && ['dev', 'ino', 'size', 'mtimeNs'].every(name => String(stat[name]) === identity?.[name]);
-const publicEntry = entry => ({ path: entry.directory, reason: '缓存身份改变或包含未知文件，已保留' });
+const publicEntry = (entry, reason = '缓存身份发生变化，已保留') => ({ path: entry.directory, reason });
+const cacheFailure = (path, error) => ({
+  path, retryable: !!error.code && !['PREP_PATH','PREP_MANIFEST'].includes(error.code),
+  reason: error.code && !error.code.startsWith('PREP_') ? `无法清理缓存（${error.code}）` : '缓存归属或目录无法确认，已保留'
+});
 function recordMatches(entry, name, value) {
   if (!value || value.token !== path.basename(entry.directory) || value.key !== entry.key) return false;
   if (name === 'owner.json') return value.format === OWNER_FORMAT && value.sessionId === entry.spec.sessionId;
@@ -54,8 +58,14 @@ async function readJson(root, file) {
   return { value, identity: fileIdentity(stat) };
 }
 async function removeEmptyDirectory(directory, control) {
-  try { await plainDirectory(directory); control?.check(); await fs.rmdir(directory); control?.progress(); }
-  catch (failure) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(failure.code)) throw failure; }
+  try {
+    await plainDirectory(directory); control?.check(); await fs.rmdir(directory); control?.progress();
+    return true;
+  } catch (failure) {
+    if (failure.code === 'ENOENT') return true;
+    if (['ENOTEMPTY','EEXIST'].includes(failure.code)) return false;
+    throw failure;
+  }
 }
 async function durableJson(file, value) {
   const handle = await fs.open(file, 'wx');
@@ -353,7 +363,7 @@ export class RenderCache {
   }
   async removeEntry(entry, { control }={}) {
     control?.check();
-    if (entry.deleting || entry.leases || this.building.has(entry.key)) return { freedBytes: 0, deletedFiles: 0, preserved: [{ path: entry.directory, reason: '缓存正在使用，已保留' }] };
+    if (entry.deleting || entry.leases || this.building.has(entry.key)) return { freedBytes: 0, deletedFiles: 0, preserved: [{ path: entry.directory, reason: '缓存正在使用，等待释放', retryable:true }] };
     entry.deleting = true; let freedBytes = 0, deletedFiles = 0;
     try {
       let receipt;
@@ -370,7 +380,7 @@ export class RenderCache {
         if (!recordMatches(entry, name, (await readJson(this.root, path.join(entry.directory, name))).value)) return { freedBytes, deletedFiles, preserved: [publicEntry(entry)] };
       }
       const names = await fs.readdir(entry.directory);
-      if (names.some(name => !['owner.json', 'manifest.json', 'video.mp4', REMOVAL].includes(name))) return { freedBytes: 0, deletedFiles: 0, preserved: [publicEntry(entry)] };
+      if (names.some(name => !['owner.json', 'manifest.json', 'video.mp4', REMOVAL].includes(name))) return { freedBytes: 0, deletedFiles: 0, preserved: [publicEntry(entry, '缓存目录含有未知文件，已保留')] };
       if (!receipt) {
         control?.check();
         await durableJson(path.join(entry.directory, REMOVAL), value);
@@ -398,7 +408,24 @@ export class RenderCache {
       control?.progress();
       for (const parent of [path.dirname(entry.directory), path.dirname(path.dirname(entry.directory))]) try { await plainDirectory(parent); control?.check(); await fs.rmdir(parent); control?.progress(); } catch (failure) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(failure.code)) throw failure; }
       return { freedBytes, deletedFiles, preserved: [] };
-    } catch (failure) { control?.check(); return { freedBytes, deletedFiles, preserved: [publicEntry(entry)] }; }
+    } catch (failure) {
+      control?.check();
+      if (failure.code === 'ENOENT') {
+        try {
+          if (await removeEmptyDirectory(entry.directory, control)) {
+            control?.check();
+            this.entries.delete(entry.id);
+            this.revision++;
+            return { freedBytes, deletedFiles, preserved: [] };
+          }
+        } catch (error) {
+          control?.check();
+          return { freedBytes, deletedFiles, preserved:[cacheFailure(entry.directory,error)] };
+        }
+        return { freedBytes, deletedFiles, preserved:[publicEntry(entry,'缓存缺少归属记录，已保留')] };
+      }
+      return { freedBytes, deletedFiles, preserved:[cacheFailure(entry.directory,failure)] };
+    }
     finally { entry.deleting = false; }
   }
   async prune({ keepKeys, sessionId, targetBytes = this.maxBytes, control } = {}) {
@@ -418,7 +445,7 @@ export class RenderCache {
     if(control)await control.wait(this.cancelSession(id));else await this.cancelSession(id);
     let result;
     try { result = await this.prune({ sessionId: id, keepKeys: [], control }); }
-    catch { control?.check(); return { freedBytes: 0, deletedFiles: 0, preserved: [{ path: path.join(this.root, id), reason: '缓存目录异常，已保留' }] }; }
+    catch (failure) { control?.check(); return { freedBytes: 0, deletedFiles: 0, preserved: [cacheFailure(path.join(this.root, id),failure)] }; }
     const sessionRoot = path.join(this.root, id);
     try {
       await plainDirectory(sessionRoot);
@@ -434,7 +461,7 @@ export class RenderCache {
       control?.check();
       if (remaining.length) result.preserved.push({ path: sessionRoot, reason: '缓存目录仍含未知、未完成或被替换的文件，已保留' }); else {await fs.rmdir(sessionRoot);control?.progress();}
     }
-    catch (failure) { control?.check(); if (failure.code !== 'ENOENT') result.preserved.push({ path: sessionRoot, reason: '缓存目录异常，已保留' }); }
+    catch (failure) { control?.check(); if (failure.code !== 'ENOENT') result.preserved.push(cacheFailure(sessionRoot,failure)); }
     return result;
   }
   async close() { this.closed = true; const ids = new Set([...this.building.values(),...this.pending.values()].map(work => work.spec.sessionId)); for (const entry of this.entries.values()) if (entry.leases) ids.add(entry.spec.sessionId); await Promise.all([...ids].map(id => this.cancelSession(id))); await Promise.all([...this.pendingCleanup]); }

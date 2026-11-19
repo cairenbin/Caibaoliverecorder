@@ -121,3 +121,23 @@ test('历史超时失败记录在同一进程自动维护重试，无需退出�
   assert.equal(app.store.get('SELECT id FROM sessions WHERE id=?',f.session.id),undefined);
   await assert.rejects(fs.stat(f.original),{code:'ENOENT'});
 });
+
+test('HTTP 重试只恢复已确认的清理，释放占用后可在原进程结束',async t=>{
+  const app=await application(t),f=await material(app),other=await material(app);
+  const url=id=>`http://127.0.0.1:${app.port}/api/sessions/${id}/retry-cleanup`;
+  const request=id=>fetch(url(id),{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  const untouched=await request(other.session.id);
+  assert.equal(untouched.status,202);
+  assert.equal((await untouched.json()).pending,false);
+  const unlink=fs.unlink.bind(fs),blocked=t.mock.method(fs,'unlink',async file=>{
+    if(file===f.original)throw Object.assign(Error('busy'),{code:'EBUSY'});
+    return unlink(file);
+  });
+  try {
+    await assert.rejects(app.deletingSessions.start(f.session.id).done,/EBUSY/);
+    assert.equal(app.store.pendingCleanup().length,1);
+  }finally{blocked.mock.restore();}
+  assert.equal((await request(f.session.id)).status,202);
+  await until(()=>!app.store.pendingCleanup().length);
+  await fs.stat(other.original);
+});

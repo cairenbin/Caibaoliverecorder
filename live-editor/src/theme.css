@@ -1,5 +1,5 @@
 /* Workbench palette. Video overlays and export colors are independent. */
-:root {
+:root, [data-workbench-theme="classic"] {
   --bg: #f8d4e0;
   --panel: #f4a8bc;
   --stage: #f8d4e0;
@@ -74,6 +74,7 @@
   --shadow: 0 8px 24px rgba(62, 36, 46, 0.08);
   --anchor-remove-hover: rgba(122,62,82,.08);
   --anchor-toggle-hover: rgba(122,62,82,.06);
+  --anchor-start-edge: rgba(189, 70, 90, .22);
   --power-ok-ink: #285d38;
   --power-ok-surface: #edf7ee;
   --power-ok-edge: #b9d6bf;
@@ -92,4 +93,268 @@
   --waveform-pending: rgba(255,125,146,.28);
   --waveform-unavailable: rgba(145,105,80,.16);
   --density-bar: rgba(255,125,146,.9);
+}
+
+/* Each optional theme overrides colors by role. No component selectors here. */
+[data-workbench-theme="rose"] {
+  /* Frame, editor and conversation surfaces */
+  --panel: #f2518b;
+  --panel-ink: #28131d;
+  --panel-muted: #3e182b;
+  --panel-edge: #6d1a3c;
+  --bg: #fbf6f0;
+  --stage: #fbf6f0;
+  --feed-surface: #fcf8f3;
+  --feed-controls-surface: #f3e9e3;
+  --feed-hover-surface: #f3e9e3;
+  --faint: #775562;
+  --accent-dark: #9c244e;
+
+  /* Selected elements and checkboxes */
+  --selected: #f8eee8;
+  --selection-edge: #853249;
+  --selection-ink: #573039;
+  --toggle-selected-surface: #f5e3d6;
+  --message-rail-track: #e9dcd6;
+  --message-rail-thumb: #a14955;
+  --message-rail-thumb-hover: #853249;
+
+  /* Monitored room cards */
+  --monitor-surface: #f5e8de;
+  --monitor-edge: #b98183;
+  --monitor-live-edge: var(--monitor-edge);
+  --monitor-control-surface: var(--monitor-surface);
+  --monitor-control-edge: var(--selection-edge);
+  --monitor-control-ink: var(--selection-edge);
+
+  /* Platform marks need a light backing on the saturated frame. */
+  --platform-badge-surface: #fff9f5;
+  --platform-badge-edge: #a25e74;
+  --platform-badge-icon-filter: brightness(.82);
+
+  /* Header and room-add controls. Recording and error colors retain their own roles. */
+  --room-add-surface: #b7312c;
+  --room-add-hover: #9f261f;
+  --room-add-ink: #fff;
+  --room-add-edge: #801b25;
+  --room-add-disabled-surface: #f6c0d2;
+  --room-add-disabled-ink: #68283e;
+  --room-add-disabled-opacity: 1;
+  --service-ready-surface: var(--room-add-surface);
+  --service-ready-hover: var(--room-add-hover);
+  --service-ready-ink: var(--room-add-ink);
+  --service-ready-edge: var(--panel-edge);
+  --service-ready-dot: var(--service-ready-ink);
+}
+
+/* Shared roles for palettes with their own coordinated frame and accent. */
+:is(
+  [data-workbench-theme="blue"],
+  [data-workbench-theme="obsidian"],
+  [data-workbench-theme="silver"],
+  [data-workbench-theme="green"],
+  [data-workbench-theme="yellow"]
+) {
+  --bg: var(--stage);
+  --input: var(--card);
+  --surface-white: var(--card);
+  --line: rgba(var(--line-rgb), .23);
+  --line-strong: rgba(var(--line-rgb), .48);
+  --faint: var(--muted);
+  --icon: var(--muted);
+  --ink: var(--text);
+  --panel-ink: var(--text);
+  --panel-muted: var(--muted);
+  --panel-edge: var(--line-strong);
+  --feed-surface: var(--card);
+  --feed-hover-surface: var(--stage);
+  --selection-edge: var(--accent-dark);
+  --selection-ink: var(--text);
+  --toggle-selected-surface: var(--selected);
+  --hover: rgba(var(--accent-rgb), .10);
+  --monitor-edge: var(--line-strong);
+  --monitor-control-edge: var(--line-strong);
+  --anchor-remove-hover: var(--hover);
+  --anchor-toggle-hover: var(--hover);
+  --platform-badge-surface: #fff;
+  --platform-badge-edge: var(--line-strong);
+  --platform-badge-icon-filter: brightness(.82);
+  --room-add-ink: var(--primary-ink, var(--on-solid-action));
+  --room-add-disabled-surface: var(--selected);
+  --room-add-disabled-ink: var(--muted);
+  --room-add-disabled-edge: var(--line-strong);
+  --room-add-disabled-opacity: 1;
+  --service-ready-surface: var(--selected);
+  --service-ready-hover: var(--feed-controls-surface);
+  --service-ready-ink: var(--text);
+  --service-ready-edge: var(--selection-edge);
+  --service-ready-dot: var(--selection-edge);
+  --service-idle: var(--muted);
+  --player-button: var(--card);
+  --player-ink: var(--text);
+  --preview-idle-edge: var(--line);
+  --preview-control-edge: var(--line-strong);
+  --preview-control-hover-edge: var(--accent);
+  --progress-track: var(--line);
+  --preparation-track: var(--line);
+  --cache-surface: var(--card);
+  --message-glass: rgba(var(--accent-rgb), .10);
+  --message-shadow-ink: rgba(var(--line-rgb), .13);
+  --message-rail-track: rgba(var(--accent-rgb), .14);
+  --message-rail-thumb: var(--accent);
+  --message-rail-thumb-hover: var(--accent-hover);
+  --message-rail-grip: var(--primary-ink, var(--on-solid-action));
+  --message-rail-tip: var(--accent-dark);
+  --waveform-peak: rgba(var(--accent-rgb), .45);
+  --waveform-rms: rgba(var(--accent-rgb), .83);
+  --waveform-pending: rgba(var(--accent-rgb), .27);
+  --waveform-unavailable: var(--line);
+  --density-bar: rgba(var(--accent-rgb), .77);
+  --draft-edge: var(--line-strong);
+  --draft-surface: rgba(var(--accent-rgb), .09);
+  --signal-hint-surface: var(--card);
+  --toast-shadow-ink: rgba(var(--line-rgb), .18);
+  --update-shadow-ink: var(--line);
+  --shadow: 0 8px 24px rgba(var(--line-rgb), .12);
+}
+
+[data-workbench-theme="blue"] {
+  --panel: #58aeff;
+  --stage: #f4f9ff;
+  --card: #fff;
+  --feed-controls-surface: #e2f0ff;
+  --text: #10253d;
+  --muted: #173957;
+  --line-rgb: 29, 81, 132;
+  --accent: #0068c7;
+  --accent-rgb: 0, 104, 199;
+  --accent-hover: #0057ae;
+  --accent-dark: #004b92;
+  --selected: #d9edff;
+}
+
+[data-workbench-theme="obsidian"] {
+  --workbench-color-scheme: dark;
+  --panel: #0b0b0d;
+  --stage: #151412;
+  --card: #211f1b;
+  --feed-controls-surface: #1b1814;
+  --text: #fae4b0;
+  --muted: #d8c398;
+  --line-rgb: 176, 144, 84;
+  --accent: #f4c65d;
+  --accent-rgb: 244, 198, 93;
+  --accent-hover: #ffd984;
+  --accent-dark: #ffd784;
+  --selected: #3a2e1b;
+  --selection-ink: var(--accent-dark);
+  --primary-ink: #261906;
+  --room-add-disabled-surface: #2b261d;
+  --room-add-disabled-edge: #806a43;
+  --theme-swatch-edge: #b89451;
+  --stage-glow: rgba(244, 198, 93, .065);
+  --player-button: #30271b;
+  --player-ink: var(--accent-dark);
+  --preview-loading-surface: rgba(4, 6, 9, .78);
+  --danger: #fc8278;
+  --danger-text: #ffb3a9;
+  --danger-button-fill: #aa443b;
+  --danger-hover: #95362e;
+  --danger-surface: #472b2b;
+  --invalid-edge: #f4938a;
+  --warning-text: #f6d297;
+  --warning-surface: #403321;
+  --lottery-ink: #d2b3f4;
+  --power-ok-ink: #c0e1c9;
+  --power-ok-surface: #253d2e;
+  --power-ok-edge: #627d6a;
+  --power-warning-ink: var(--warning-text);
+  --power-warning-surface: var(--warning-surface);
+  --power-warning-edge: #8e7455;
+  --modal-backdrop: rgba(0, 0, 0, .65);
+  --service-backdrop: rgba(0, 0, 0, .56);
+  --service-glass-edge: rgba(244, 198, 93, .46);
+  --service-glass: rgba(40, 34, 24, .88);
+  --service-recording-glass: rgba(61, 45, 25, .96);
+  --update-close-surface: rgba(244, 198, 93, .16);
+  --message-rail-tip: #23190c;
+  --message-warm-glass: #43301d;
+  --message-warm-edge: #bf894a;
+  --shadow: 0 8px 24px rgba(0, 0, 0, .32);
+}
+
+[data-workbench-theme="silver"] {
+  --panel: #5c318b;
+  --panel-ink: #fbf6ff;
+  --panel-muted: #eaddf7;
+  --panel-edge: #bca0da;
+  --panel-hover-ink: var(--panel-ink);
+  --panel-selected-ink: var(--selection-ink);
+  --panel-selected-hover-surface: #f4e8ff;
+  --panel-focus-ring: #efe0ff;
+  --stage: #f6f3fa;
+  --card: #fff;
+  --feed-controls-surface: #eae0f5;
+  --text: #2b1e3c;
+  --muted: #514361;
+  --line-rgb: 86, 63, 116;
+  --line: rgba(var(--line-rgb), .31);
+  --accent: #5b2a99;
+  --accent-rgb: 91, 42, 153;
+  --accent-hover: #482078;
+  --accent-dark: #4c257a;
+  --selected: #eaddfa;
+  --selection-ink: var(--accent-dark);
+  --material-card-ink: var(--text);
+  --monitor-ink: var(--text);
+  --room-input-ink: var(--text);
+  --room-add-surface: #efe2ff;
+  --room-add-hover: #faf0ff;
+  --room-add-ink: #482174;
+  --room-add-edge: #efe2ff;
+  --room-add-disabled-surface: #7756a3;
+  --room-add-disabled-ink: #f7efff;
+  --room-add-disabled-edge: #bca0da;
+  --service-idle: #eaddf7;
+  --service-idle-edge: var(--panel-edge);
+  --service-ready-surface: #48216e;
+  --service-ready-hover: #7147a1;
+  --service-ready-ink: #f6eaff;
+  --service-ready-edge: var(--panel-edge);
+  --service-ready-dot: #f1defe;
+  --player-button: #f5eefc;
+  --player-ink: var(--accent-dark);
+}
+
+[data-workbench-theme="green"] {
+  --panel: #55ce91;
+  --stage: #f3fcf7;
+  --card: #fcfffd;
+  --feed-controls-surface: #dff6ea;
+  --text: #102e21;
+  --muted: #164733;
+  --line-rgb: 27, 104, 72;
+  --accent: #087843;
+  --accent-rgb: 8, 120, 67;
+  --accent-hover: #066638;
+  --accent-dark: #075d36;
+  --selected: #d1f4e1;
+}
+
+[data-workbench-theme="yellow"] {
+  --panel: #ffd45a;
+  --stage: #fff9ee;
+  --card: #fffefa;
+  --feed-controls-surface: #fff0cc;
+  --text: #37280d;
+  --muted: #553900;
+  --line-rgb: 121, 84, 23;
+  --accent: #edaa1c;
+  --accent-rgb: 237, 170, 28;
+  --accent-hover: #d99a12;
+  --accent-dark: #754b00;
+  --selected: #ffebad;
+  --primary-ink: #2c1c05;
+  --room-add-edge: #9c6d13;
+  --mint: var(--accent-dark);
 }

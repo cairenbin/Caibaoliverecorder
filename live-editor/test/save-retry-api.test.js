@@ -178,3 +178,42 @@ test.after(async () => {
   if (path.dirname(root) !== path.resolve(os.tmpdir()) || !path.basename(root).startsWith('bili-save-retry-')) throw new Error('Unexpected test cleanup directory');
   await fs.rm(root, { recursive: true, force: true });
 });
+
+test('HTTP 保存失败后缓存成片被移除，可从原素材继续导出，并保留原有视频', async t => {
+  const app=await appFor(t,'restart-missing-stage'),f=await saveRetryFixture(app.store,app.media);
+  const occupied=await collideSave(f);
+  const {directory}=detailsOf(f).pendingPublication;
+  for(const file of ['final.mp4','final-danmaku.mp4'])await fs.unlink(path.join(directory,file));
+  assert.equal(rowOf(f).status,'save_failed');
+  const result=await app.request(`jobs/${f.job.id}/retry`,{});
+  assert.equal(result.status,200,JSON.stringify(result.body));
+  assert.equal(rowOf(f).status,'queued');
+  assert.equal(await fs.readFile(occupied,'utf8'),'用户已有的视频，不能覆盖');
+  assert.equal(await fs.readFile(f.original,'hex'),FLV_HEADER.toString('hex'));
+});
+
+test('旧的待保存任务在超过 100 条完成记录后仍可处理，并可只放弃任务',async t=>{
+  const app=await appFor(t,'unfinished-job-visibility'),f=await saveRetryFixture(app.store,app.media);
+  const occupied=await collideSave(f);
+  for(let n=0;n<101;n++)app.store.run("INSERT INTO jobs(id,session,created,status,data) VALUES(?,?,?,'done','{}')",String(n),f.session.id,'2099-01-01');
+  assert.ok(app.snapshot().jobs.find(job=>job.id===f.job.id));
+  const history=await app.request(`sessions/${f.session.id}/export-history`);
+  assert.equal(history.body.jobs.length,100);
+  const older=await app.request(`sessions/${f.session.id}/export-history?before=${history.body.next}`);
+  assert.deepEqual(older.body.jobs.map(job=>job.id),['0']);
+  const result=await app.request(`jobs/${f.job.id}/delete`,{confirmed:true,recordOnly:true,abandonSave:true});
+  assert.equal(result.status,200,JSON.stringify(result.body));
+  assert.equal(rowOf(f),undefined);
+  assert.equal(await fs.readFile(occupied,'utf8'),'用户已有的视频，不能覆盖');
+});
+
+test('HTTP 素材翻页可以读到第 201 条',async t=>{
+  const app=await appFor(t,'older-material-sessions');
+  for(let i=0;i<=200;i++)app.store.createSession({id:`session-${String(i).padStart(3,'0')}`,created:'2025-01-01',status:'finished'});
+  const first=app.snapshot().sessions;
+  assert.equal(first.length,200);
+  const cursor=first.at(-1);
+  const result=await app.request('sessions?'+new URLSearchParams({before:cursor.created,id:cursor.id}));
+  assert.equal(result.status,200,JSON.stringify(result.body));
+  assert.deepEqual(result.body.sessions.map(session=>session.id),['session-000']);
+});

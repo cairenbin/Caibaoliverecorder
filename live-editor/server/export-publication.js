@@ -304,6 +304,18 @@ export class ExportPublication {
     if (['EACCES', 'EPERM', 'EROFS', 'ENOENT', 'ENOTDIR'].includes(error.code)) return failure('DESTINATION_UNAVAILABLE', `目标目录无法写入或已被移走，已编码的视频已保留：${destination}`, error);
     return error;
   }
+  async stageFilesMissing(job, pending) {
+    const manifest=await this.read(pending.directory,job.id);
+    if(manifest.publishedFiles.length)return false;
+    for(const file of manifest.files){
+      if(await plainFile(path.join(pending.directory,file.temporary),{missing:true}))return false;
+    }
+    return true;
+  }
+  async assertRecoveryStorage(job) {
+    await directory(path.dirname(this.root));
+    if(job.outputRoot)await directory(job.outputRoot);
+  }
   async verifyPublished(job) {
     try {
       const files = job.mode === 'dual'

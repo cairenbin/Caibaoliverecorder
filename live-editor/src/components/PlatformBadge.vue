@@ -37,7 +37,7 @@ const label = computed(() => platformLabel(props.platform));
   height: var(--badge-size);
   border: 1px solid var(--platform-badge-edge);
   border-radius: 50%;
-  background: var(--panel);
+  background: var(--platform-badge-surface, var(--panel));
 }
 .platform-badge--compact {
   --badge-size: 24px;
@@ -47,5 +47,6 @@ const label = computed(() => platformLabel(props.platform));
   display: block;
   width: var(--badge-icon-size);
   height: var(--badge-icon-size);
+  filter: var(--platform-badge-icon-filter, none);
 }
 </style>

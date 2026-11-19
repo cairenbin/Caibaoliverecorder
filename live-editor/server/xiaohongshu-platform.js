@@ -208,8 +208,11 @@ export class XiaohongshuPlatform {
   checkProfiles() {
     if (this.core.closed || this.paused || !this.resolver.profileStatus) return Promise.resolve();
     if (this.checking) return this.checking;
-    const target = [...this.targets.values()].find(target => target.enabled &&
-      !this.core.entries.get(target.roomId)?.recording && Date.now() >= (this.nextCheck.get(target.uid) || 0));
+    const now = Date.now();
+    const due = item => this.nextCheck.get(item.uid) ?? 0;
+    const target = [...this.targets.values()]
+      .sort((a,b) => due(a)-due(b))
+      .find(item => item.enabled && !this.core.entries.get(item.roomId)?.recording && now >= due(item));
     if (!target) return Promise.resolve();
     this.nextCheck.set(target.uid, Date.now() + 120000);
     const version = this.changedIntent.get(target.uid);

@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { assertDeletable, prepareDeletion, removeDeletionFiles } from './deletion.js';
+import { assertDeletable, prepareDeletion, removeDeletionFiles, deletionStorageIdentity } from './deletion.js';
 import { sourceReaderCount } from './storage-files.js';
 import { isStickerPlaceholder } from './chat-filter.js';
 import { ChatRuleIndex } from './chat-rules.js';
@@ -19,6 +19,8 @@ export class Store {
   constructor(root) {
     this.root = path.resolve(root);
     fs.mkdirSync(this.root, { recursive: true });
+    const rootStat=fs.statSync(this.root,{bigint:true});
+    this.cleanupStorage=[String(rootStat.dev),String(rootStat.ino)];
     try {
     this.db = new DatabaseSync(path.join(this.root, 'editor.sqlite'));
     this.db.function('is_sticker_placeholder', { deterministic: true }, text => Number(isStickerPlaceholder(text)));
@@ -63,12 +65,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, session TEXT REFERENCES sessions(id), created TEXT,
         status TEXT, progress REAL DEFAULT 0, data TEXT, file TEXT DEFAULT '', error TEXT DEFAULT '');
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS cleanup_completed(session TEXT REFERENCES sessions(id) ON DELETE CASCADE, path TEXT, PRIMARY KEY(session,path));
+      CREATE TABLE IF NOT EXISTS cleanup_retained(session TEXT PRIMARY KEY, title TEXT NOT NULL, paths TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deleted_source_paths(path TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
       CREATE TABLE IF NOT EXISTS recovery_records(id TEXT PRIMARY KEY,kind TEXT,record_key TEXT,original TEXT,created TEXT);
     `);
     if (!this.all('PRAGMA table_info(sessions)').some(c => c.name === 'deleted_at')) this.db.exec("ALTER TABLE sessions ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''");
-    for (const name of ['purged_at','purge_started_at','purge_error']) if (!this.all('PRAGMA table_info(sessions)').some(c => c.name === name)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+    for (const name of ['purged_at','purge_started_at','purge_error','purge_plan','purge_retained']) if (!this.all('PRAGMA table_info(sessions)').some(c => c.name === name)) this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
     if (!this.all('PRAGMA table_info(jobs)').some(c => c.name === 'mode')) this.db.exec("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'clean'");
     if (!this.all('PRAGMA table_info(source_storage)').some(c => c.name === 'eligible')) this.db.exec('ALTER TABLE source_storage ADD COLUMN eligible INTEGER NOT NULL DEFAULT 0');
     if (!this.all('PRAGMA table_info(compact_chunks)').some(c => c.name === 'keys_hash')) this.db.exec("ALTER TABLE compact_chunks ADD COLUMN keys_hash TEXT NOT NULL DEFAULT ''");
@@ -96,14 +100,25 @@ export class Store {
     return this.session(id);
   }
   session(id) { return this.get("SELECT * FROM sessions WHERE id=? AND deleted_at=''", id); }
-  sessions() { return this.all("SELECT * FROM sessions WHERE deleted_at='' ORDER BY created DESC LIMIT 200"); }
-  pendingCleanup() { return this.all("SELECT id,title,created,status,duration,purge_started_at,purge_error FROM sessions WHERE deleted_at!='' AND purge_started_at!='' AND purged_at='' ORDER BY purge_started_at DESC"); }
-  confirmDeletion(id) {
-    assertDeletable(this, id);
-    const now = new Date().toISOString();
-    this.run("UPDATE sessions SET deleted_at=CASE WHEN deleted_at='' THEN ? ELSE deleted_at END,purge_started_at=CASE WHEN purge_started_at='' THEN ? ELSE purge_started_at END,purge_error='' WHERE id=?", now, now, id);
+  sessions(before) {
+    if (before) return this.all("SELECT * FROM sessions WHERE deleted_at='' AND (created,id)<(?,?) ORDER BY created DESC,id DESC LIMIT 200",before.created,before.id);
+    return this.all("SELECT * FROM sessions WHERE deleted_at='' ORDER BY created DESC,id DESC LIMIT 200");
   }
-  async deleteSession(id, confirmed, { control, resourcesStopped = false }={}) {
+  pendingCleanup() {
+    return this.all("SELECT id,title,created,status,duration,purge_started_at,purge_error,purge_retained FROM sessions WHERE deleted_at!='' AND purge_started_at!='' AND purged_at='' ORDER BY purge_started_at DESC")
+      .map(({purge_retained,...item})=>({...item,canKeep:!!purge_retained,retained:purge_retained?JSON.parse(purge_retained):[]}));
+  }
+  retainedCleanup() {
+    return this.all('SELECT session,title,paths FROM cleanup_retained ORDER BY rowid DESC')
+      .map(({paths,...item})=>({...item,retained:JSON.parse(paths)}));
+  }
+  confirmDeletion(id) {
+    const session = assertDeletable(this, id);
+    if (session.purge_started_at) return;
+    const now = new Date().toISOString();
+    this.run("UPDATE sessions SET deleted_at=?,purge_started_at=?,purge_plan='new',purge_error='' WHERE id=?",now,now,id);
+  }
+  async deleteSession(id, confirmed, { control, resourcesStopped = false, keepRetained = false }={}) {
     if (confirmed !== true) throw new Error('请先确认是否删除这份素材。');
     this.deletions??=new Set();
     if(this.deletions.has(id))throw new Error('这份素材正在删除，请稍候。');
@@ -112,12 +127,33 @@ export class Store {
     const wait=operation=>control?control.drain(operation):operation;
     try {
       control?.check();
-      assertDeletable(this,id);
+      const session=assertDeletable(this,id);
       if(this.preparation&&!resourcesStopped){preparationBlocked=true;await wait(this.preparation.cancelSession(id));}
       if(this.renderCache&&!resourcesStopped){cacheBlocked=true;this.renderCache.blockSession(id);await wait(this.renderCache.cancelSession(id));}
       if(this.storage?.currentSession===id||this.sources(id).some(source=>sourceReaderCount(this,source.id)))throw new Error('素材仍在读取或整理，请等待结束后再删除。');
       control?.stage('checking', '正在核对素材文件');
+      const storageIdentity=await wait(deletionStorageIdentity(this.root));
+      const savedPlan=session.purge_plan && session.purge_plan!=='new' ? JSON.parse(session.purge_plan) : null;
+      if (JSON.stringify(savedPlan?.storageIdentity||this.cleanupStorage)!==JSON.stringify(storageIdentity)) {
+        throw Object.assign(new Error('原存储位置已变化，等待原磁盘连接'), {code:'CLEANUP_STORAGE'});
+      }
       const plan=await wait(prepareDeletion(this,id,{control}));
+      const legacy=!session.purge_plan && !!session.purge_started_at;
+      const retained=[];
+      if (legacy) {
+        retained.push(...plan.files.map(({file})=>({path:file,reason:'旧任务无法确认文件归属，已保留'})));
+        plan.files=[];
+        // Only an empty directory can be removed without an older identity.
+      } else if (savedPlan) {
+        const originalPaths=new Set(savedPlan.files.map(({file})=>sourcePathKey(file)));
+        retained.push(...plan.files.filter(({file})=>!originalPaths.has(sourcePathKey(file)))
+          .map(({file})=>({path:file,reason:'首次清理后出现的文件，已保留'})));
+        plan.files=savedPlan.files;
+        plan.directories=savedPlan.directories;
+      }
+      const serialized=savedPlan||legacy?session.purge_plan:JSON.stringify(
+        {storageIdentity,files:plan.files,directories:plan.directories},(_,value)=>typeof value==='bigint'?String(value):value
+      );
       this.transaction(()=>{
         control?.check();
         assertDeletable(this,id);
@@ -126,32 +162,46 @@ export class Store {
         const now=new Date().toISOString();
         // Retain the manifest until physical cleanup succeeds, so partial
         // deletion remains retryable but cannot restore a damaged recording.
-        this.run("UPDATE sessions SET deleted_at=CASE WHEN deleted_at='' THEN ? ELSE deleted_at END,purge_started_at=?,purge_error='' WHERE id=?",now,now,id);
+        this.run("UPDATE sessions SET deleted_at=CASE WHEN deleted_at='' THEN ? ELSE deleted_at END,purge_started_at=CASE WHEN purge_started_at='' THEN ? ELSE purge_started_at END,purge_error='',purge_retained='',purge_plan=? WHERE id=?",now,now,serialized,id);
       });
       started=true;
       control?.stage('files', '正在清理原片与分片');
-      const result=await removeDeletionFiles(this,id,plan,{control});
+      const completedPaths=new Set(this.all('SELECT path FROM cleanup_completed WHERE session=?',id).map(x=>x.path));
+      const result=await removeDeletionFiles(this,id,plan,{control,completedPaths,
+        markComplete:file=>{
+          const {n}=this.get('SELECT total_changes() AS n');
+          const {changes}=this.run('INSERT OR IGNORE INTO cleanup_completed VALUES(?,?)',id,file);
+          // Updating our journal leaves file references unchanged.
+          if(plan.protectionCache.revision===n)plan.protectionCache.revision=n+Number(changes);
+        }});
+      result.retained.push(...retained);
+      let retryable=[];
       if(this.renderCache){
         control?.stage('cache', '正在清理预处理缓存');
         const cache=await this.renderCache.removeSession(id,{control});
         result.freedBytes+=cache.freedBytes;result.deletedFiles+=cache.deletedFiles;
         result.preserved.push(...cache.preserved.map(entry=>({...entry,cache:true})));
-        if(cache.preserved.length)result.message+=' 部分预处理缓存身份异常或仍有未知文件，已保留。';
+        retryable=cache.preserved.filter(entry=>entry.retryable);
+        result.retained.push(...cache.preserved.filter(entry=>!entry.retryable));
       }
       if(this.temporaryWorkspaces){
         control?.stage('temporary', '正在清理临时文件');
         const temporary=await this.temporaryWorkspaces.removeSession(id,{control});
         result.freedBytes+=temporary.freedBytes;result.deletedFiles+=temporary.deletedFiles;
       }
-      // Keep the durable source manifest until all internal work files are
-      // gone. A failed unlink must remain retryable, including after restart.
-      if(result.pending || result.preserved.some(entry=>entry.cache)) {
-        const reason=result.preserved.find(entry=>entry.cache)?.reason || '内部片段目录仍有未清理的文件。';
-        this.run('UPDATE sessions SET purge_error=? WHERE id=?',reason,id);
-        return {...result,ok:false,pending:true,message:'素材清理未完成，空闲时会自动重试；可在设置中查看。'};
+      const remaining=[...new Map(result.retained.map(entry=>[entry.path,entry])).values()];
+      if (retryable.length || (remaining.length && !keepRetained)) {
+        const reason=retryable[0]?.reason || remaining[0].reason;
+        this.run('UPDATE sessions SET purge_error=?,purge_retained=? WHERE id=?',reason,
+          retryable.length?'':JSON.stringify(remaining),id);
+        return {...result,ok:false,pending:true,message:`素材清理未完成。${reason}`};
+      }
+      if (JSON.stringify(await wait(deletionStorageIdentity(this.root)))!==JSON.stringify(storageIdentity)) {
+        throw Object.assign(new Error('原存储位置已变化，等待原磁盘连接'), {code:'CLEANUP_STORAGE'});
       }
       control?.stage('records', '正在清理编辑记录');
       this.transaction(()=>{
+        if (remaining.length) this.run('INSERT OR REPLACE INTO cleanup_retained VALUES(?,?,?)',id,session.title,JSON.stringify(remaining));
         for(const source of this.sources(id)) {
           control?.check();
           // A tiny path receipt prevents delayed webhooks/recovery scans from
@@ -180,9 +230,9 @@ export class Store {
       await this.preparation?.forgetSession(id,{alreadyStopped:true});
       this.density?.drop(id);
       this.chatRules.drop(id);
-      return {ok:true,...result};
+      return {...result,ok:true,pending:false,message:remaining.length?'素材清理已结束，已保留需核对的文件。':result.message};
     } catch(error) {
-      if(started||this.get('SELECT purge_started_at FROM sessions WHERE id=?',id)?.purge_started_at)this.run('UPDATE sessions SET purge_error=? WHERE id=?',error.message,id);
+      if(started||this.get('SELECT purge_started_at FROM sessions WHERE id=?',id)?.purge_started_at)this.run("UPDATE sessions SET purge_error=?,purge_retained='' WHERE id=?",error.message,id);
       throw error;
     } finally {
       if(cacheBlocked)this.renderCache.allowSession(id);

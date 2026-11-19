@@ -102,9 +102,7 @@ export async function prepareDeletion(store, id, { control }={}) {
     seen.add(key(file));
     const stat = await checked(root, file);
     control?.progress();
-    // Missing files are already gone. Never delete replacements created after
-    // this preflight; retries build a fresh, independently checked manifest.
-    if (stat) files.set(key(file), { file, root, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs });
+    if (stat) files.set(key(file), { file, root, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs, birthtimeNs: stat.birthtimeNs });
   }
   let checkedSources=0; control?.count(0,sources.length);
   for (const source of sources) {
@@ -165,9 +163,15 @@ export async function prepareDeletion(store, id, { control }={}) {
     sourcesSnapshot: JSON.stringify(sources), chunksSnapshot: JSON.stringify(chunks), archive: session.archive };
 }
 
-export async function removeDeletionFiles(store, id, plan, { control }={}) {
+const identityFields = ['dev', 'ino', 'size', 'mtimeNs', 'birthtimeNs'];
+const identityMatches = (stat, entry, fields = identityFields) =>
+  fields.every(field => String(stat[field]) === String(entry[field]));
+
+export async function removeDeletionFiles(store, id, plan, { control, completedPaths = new Set(), markComplete = () => {} }={}) {
   control?.check();
-  let deletedFiles = 0, freedBytes = 0, pending = false;
+  let deletedFiles = 0, freedBytes = 0;
+  const retained = new Map();
+  const retain = (file, reason) => retained.set(key(file), { path: file, reason });
   // Keep originals/companions ordered: a locked original must fail before its
   // XML or any transient chunks are removed. Only the large chunk set runs in
   // parallel, after these critical files have succeeded.
@@ -184,31 +188,46 @@ export async function removeDeletionFiles(store, id, plan, { control }={}) {
     control?.check();
     // Recheck sharing after async preflight and whenever this connection has
     // changed. A new import/export reference must never be silently deleted.
-    const stat=await checked(entry.root,entry.file);
+    if (completedPaths.has(entry.file)) {
+      if (await checked(entry.root,entry.file)) retain(entry.file, '已清理路径出现同名文件，已保留');
+      return;
+    }
     const protectedPaths=await protections(store,id,plan.protectionCache);
     control?.progress();
     if (protectedPaths.has(key(entry.file))) { plan.preserved.set(key(entry.file), { path: entry.file, reason: protectedPaths.get(key(entry.file)) }); return; }
-    if (!stat) return;
-    if (stat.dev !== entry.dev || stat.ino !== entry.ino || stat.size !== entry.size || stat.mtimeNs !== entry.mtimeNs) throw new Error('素材文件在删除前发生变化，已停止清理，请检查后重试。');
+    const current = await checked(entry.root, entry.file);
+    if (!current) { markComplete(entry.file); return; }
+    if (!identityMatches(current, entry)) {
+      retain(entry.file, '文件已被替换或发生变化，已保留');
+      return;
+    }
+    control?.check();
     try { await fs.unlink(entry.file); }
-    catch (error) { if (error.code === 'ENOENT') return; throw new Error(`未能删除素材文件，可稍后重试：${entry.file}（${error.code || error.message}）`, { cause: error }); }
+    catch (error) {
+      if (error.code === 'ENOENT') { markComplete(entry.file); return; }
+      throw Object.assign(new Error(`未能删除素材文件，可稍后重试：${entry.file}（${error.code || error.message}）`, { cause: error }), { code: error.code });
+    }
+    markComplete(entry.file);
     deletedFiles++;
     control?.progress();
     // Count the last hard link only; old archives can share original FLV data.
-    if (stat.nlink <= 1n) freedBytes += Number(stat.size);
+    if (current.nlink <= 1n) freedBytes += Number(current.size);
     } finally { if (!control?.signal.aborted) control?.count(++completed,plan.files.length); }
   }
   for (const entry of plan.directories) {
     control?.check();
     const stat = await checked(entry.root, entry.file, true); if (!stat) continue;
-    if (stat.dev !== entry.dev || stat.ino !== entry.ino) throw new Error('内部片段目录在删除前发生变化，已停止清理。');
+    if (!identityMatches(stat, entry, ['dev', 'ino'])) {
+      retain(entry.file, '内部片段目录发生变化，已保留');
+      continue;
+    }
     control?.check();
     try { await fs.rmdir(entry.file); }
     catch (error) {
       if (error.code === 'ENOENT') continue;
       if (['ENOTEMPTY','EEXIST'].includes(error.code)) {
         const protectedPaths=await protections(store,id,plan.protectionCache);
-        if((await fs.readdir(entry.file)).some(name=>!protectedPaths.has(key(path.join(entry.file,name)))))pending=true;
+        if((await fs.readdir(entry.file)).some(name=>!protectedPaths.has(key(path.join(entry.file,name)))))retain(entry.file, '内部片段目录仍有其他文件，已保留');
         plan.preserved.set(key(entry.file), { path: entry.file, reason: '目录中仍有其他文件，已保留' }); continue;
       }
       throw error;
@@ -216,6 +235,12 @@ export async function removeDeletionFiles(store, id, plan, { control }={}) {
     control?.progress();
   }
   const externalFilesPreserved = plan.external.size;
-  return { deletedFiles, freedBytes, pending, externalFilesPreserved, preserved: [...plan.preserved.values()],
+  return { deletedFiles, freedBytes, pending: retained.size>0, retained: [...retained.values()], externalFilesPreserved, preserved: [...plan.preserved.values()],
     message: externalFilesPreserved ? `素材缓存已删除；保留 ${externalFilesPreserved} 个外部导入的原文件和已导出视频。` : '素材及本项目缓存已永久删除，已导出视频保留。' };
+}
+
+export async function deletionStorageIdentity(root) {
+  const stat = await checked(path.dirname(root), root, true);
+  if (!stat) throw Object.assign(new Error('等待磁盘连接'), {code:'CLEANUP_STORAGE'});
+  return [String(stat.dev), String(stat.ino)];
 }

@@ -4,7 +4,7 @@ import { ui } from '../../shared/ui-copy.js';
 import {ref,computed,watch,onMounted,onBeforeUnmount} from 'vue';
 import {aggregateAudio,aggregateDensity,audioStateLabel,densityStateLabel,timeAtPixel,windowPercent} from '../timeline-signals.js';
 
-const props=defineProps({kind:{type:String,default:'audio'},audio:Object,density:Object,from:{type:Number,default:0},to:{type:Number,default:0},dataFrom:{type:Number,default:0},dataTo:{type:Number,default:0},position:{type:Number,default:0},selected:Boolean,loading:Boolean,error:String,disabled:Boolean});
+const props=defineProps({kind:{type:String,default:'audio'},theme:String,audio:Object,density:Object,from:{type:Number,default:0},to:{type:Number,default:0},dataFrom:{type:Number,default:0},dataTo:{type:Number,default:0},position:{type:Number,default:0},selected:Boolean,loading:Boolean,error:String,disabled:Boolean});
 const emit=defineEmits(['seek']);
 const host=ref(null),canvas=ref(null),width=ref(0);let observer,frame=0;
 let palette;
@@ -51,8 +51,7 @@ function keySeek(event){
   const value=event.key==='Home'?props.from:event.key==='End'?props.to:event.key==='ArrowLeft'?currentValue.value-step:event.key==='ArrowRight'?currentValue.value+step:null;
   if(value!==null){event.preventDefault();event.stopPropagation();emit('seek',Math.min(props.to,Math.max(props.from,value)));}
 }
-watch(()=>[props.audio,props.density,props.from,props.to,props.dataFrom,props.dataTo,width.value],schedule);
-onMounted(()=>{
+function readPalette() {
   const style=getComputedStyle(host.value);
   palette={
     waveform_peak:style.getPropertyValue('--waveform-peak').trim(),
@@ -61,7 +60,14 @@ onMounted(()=>{
     waveform_unavailable:style.getPropertyValue('--waveform-unavailable').trim(),
     density_bar:style.getPropertyValue('--density-bar').trim(),
   };
-  observer=new ResizeObserver(entries=>{width.value=entries[0]?.contentRect.width||0;schedule();});observer.observe(host.value);schedule();});
+  schedule();
+}
+watch(()=>[props.audio,props.density,props.from,props.to,props.dataFrom,props.dataTo,width.value],schedule);
+watch(()=>props.theme,readPalette,{flush:'post'});
+onMounted(()=>{
+  readPalette();
+  observer=new ResizeObserver(entries=>{width.value=entries[0]?.contentRect.width||0;schedule();});observer.observe(host.value);
+});
 onBeforeUnmount(()=>{observer?.disconnect();if(frame)cancelAnimationFrame(frame);});
 </script>
 

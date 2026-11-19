@@ -233,3 +233,24 @@ test('authenticated anchor API can stop, start and remove a saved XHS monitor by
   assert.deepEqual(removed.body.anchors,[]);
   assert.deepEqual(app.store.setting('xiaohongshu-anchors'),[]);
 });
+
+test('轮询 25 个待机主页时后加入的主播仍可获得检查', async t => {
+  const realNow=Date.now;
+  let clock=1000;
+  t.mock.method(Date,'now',()=>clock);
+  const targets=new Map(Array.from({length:25},(_,n)=>[String(n),{uid:String(n),enabled:true}]));
+  const checked=new Set();
+  const platform={
+    core:{entries:new Map()},targets,nextCheck:new Map(),changedIntent:new Map(),
+    resolver:{async profileStatus(id){checked.add(id);return {streaming:false};}},
+    profileShutdown:new AbortController(),profileErrors:new Map(),
+    async change(id,work){await work();}
+  };
+  for(let i=0;i<60;i++){
+    await XiaohongshuPlatform.prototype.checkProfiles.call(platform);
+    clock+=5000;
+  }
+  assert.equal(checked.size,25);
+  assert.equal(checked.has('24'),true);
+  assert.ok(realNow()>0);
+});

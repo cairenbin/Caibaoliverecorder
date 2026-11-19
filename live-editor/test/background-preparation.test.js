@@ -328,3 +328,15 @@ test('a newly saved export takes priority over the startup history backlog',asyn
   await next.tick();assert.equal(next.status(id).status,'exported');
   assert.ok(f.store.get('SELECT COUNT(*) AS n FROM preparation_export_dirty').n>=9);
 });
+
+test('highlighting a message invalidates the status from an earlier full export',async t=>{
+  const f=await fixture(t);f.add('exported');f.scheduler.enqueue('exported');
+  const file=path.join(f.root,'【弹幕版】full.mp4');await fs.writeFile(file,'finished video');
+  const data={scope:'full',mode:'danmaku',ranges:[{start:0,end:120}],excluded:[],filterLottery:true,output:{file:path.join(f.root,'full.mp4'),danmakuFile:file}};
+  f.store.run('INSERT INTO jobs(id,session,status,file,mode,data) VALUES(?,?,?,?,?,?)','done','exported','done',file,'danmaku',JSON.stringify(data));
+  f.store.run("UPDATE preparation_jobs SET status='error',error='选段不足一帧。',prepared_seconds=60,bytes=123 WHERE session='exported'");
+  await f.scheduler.tick();assert.equal(f.scheduler.status('exported').status,'exported');assert.equal(f.scheduler.status('exported').error,'');assert.equal(f.scheduler.status('exported').bytes,123);assert.deepEqual(f.state.calls,[]);
+  const next=await f.restart();await next.tick();assert.equal(next.status('exported').status,'exported');assert.deepEqual(f.state.calls,[]);
+  const edit=f.store.edit('exported');f.store.saveEdit('exported',{...edit,highlighted:['different-comment']});
+  await next.invalidate('exported');await next.tick();assert.equal(next.status('exported').status,'ready');assert.deepEqual(f.state.calls,['exported']);
+});

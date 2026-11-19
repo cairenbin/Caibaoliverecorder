@@ -13,6 +13,6 @@ export async function api(route, data, { signal } = {}) {
     throw new Error(ui.service.本地服务连接失败);
   }
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || ui.service.请求失败);
+  if (!response.ok) throw Object.assign(new Error(result.error || ui.service.请求失败), {status:response.status});
   return result;
 }

@@ -15,12 +15,15 @@ export class SessionDeletion {
       detail: task.control.signal.aborted ? `等待${task.control.detail || '文件操作'}结束后自动重试` : task.control.detail,
       completed: task.control.completed || 0, total: task.control.total || 0, attempt: task.attempt }));
   }
-  start(id) {
+  start(id, { retry = false, keepRetained = false } = {}) {
     if (this.closed) throw new Error('后台正在退出，请稍后重试。');
     if (this.has(id)) return this.tasks.get(id);
+    if (retry && !this.store.get("SELECT id FROM sessions WHERE id=? AND deleted_at<>'' AND purge_started_at<>''",id)) {
+      return {accepted:{accepted:true,pending:false,id},done:Promise.resolve({ok:true,pending:false,id})};
+    }
     this.store.confirmDeletion(id);
     const task = { control: new DeletionControl({ idleMs: this.idleMs }), attempt: 1,
-      accepted: { accepted: true, pending: true, id }, done: null };
+      accepted: { accepted: true, pending: true, id }, keepRetained, done: null };
     this.tasks.set(id, task);
     task.done = this.run(id, task).finally(() => { this.tasks.delete(id); task.control.close(); });
     // Background submissions have no waiting HTTP handler to observe failure.
@@ -28,7 +31,7 @@ export class SessionDeletion {
     return task;
   }
   async delete(id, { signal } = {}) {
-    if (this.has(id)) throw new Error('这份素材正在删除，请等待完成。');
+    if (this.has(id)) return this.tasks.get(id).accepted;
     const task = this.start(id);
     const abort = () => task.control.stop();
     signal?.addEventListener('abort', abort, { once: true });
@@ -38,7 +41,7 @@ export class SessionDeletion {
   }
   async run(id, task) {
     for (;;) {
-      try { return await this.remove(id, task.control); }
+      try { return await this.remove(id, task.control, task.keepRetained); }
       catch (error) {
         const phase = task.control.phase || 'resources';
         this.store.run('UPDATE sessions SET purge_error=? WHERE id=?', `${error.message}（${task.control.detail || phase}）`, id);
@@ -52,7 +55,7 @@ export class SessionDeletion {
       }
     }
   }
-  async remove(id, control) {
+  async remove(id, control, keepRetained) {
     const { store, storage, waveform, media, density } = this;
     const resources = [
       ['素材整理', storage, () => storage.blockSession(id)],
@@ -73,7 +76,7 @@ export class SessionDeletion {
       }));
       control.check();
       const failed = results.find(result => result.status === 'rejected'); if (failed) throw failed.reason;
-      return await store.deleteSession(id, true, { control, resourcesStopped: true });
+      return await store.deleteSession(id, true, { control, resourcesStopped: true, keepRetained });
     } finally {
       density.drop(id);
       for (const [, owner] of resources) owner.allowSession(id);
