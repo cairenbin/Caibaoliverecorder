@@ -7,7 +7,7 @@ const NAME='.bili-export-checkpoint.json',OWNER='.bili-temp-owner.json',FORMAT='
 const fields=['dev','ino','size','mtimeNs','ctimeNs'];
 const identity=s=>Object.fromEntries(fields.map(k=>[k,String(s[k])]));
 const same=(s,record)=>fields.every(k=>String(s[k])===record[k]);
-const basename=name=>typeof name==='string'&&/^(?:part-\d+(?:-danmaku)?\.mp4|final(?:-danmaku)?\.mp4|audio(?:-\d+)?\.(?:m4a|flac))$/.test(name);
+const basename=name=>typeof name==='string'&&/^(?:part-\d+(?:-block-\d+(?:-[01])*)?(?:-danmaku)?\.mp4|final(?:-danmaku)?\.mp4|audio(?:-\d+)?\.(?:m4a|flac))$/.test(name);
 const invalid=()=>new Error('导出恢复记录或文件身份异常，已保留现场；可重新创建导出任务。');
 async function ordinary(file){const stat=await fs.lstat(file,{bigint:true});if(!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1n||stat.size<=0n)throw invalid();return stat;}
 

@@ -308,7 +308,7 @@ export class RenderPipeline {
       const output=parts.length===1?['-y',parts[0].file]:
         ['-force_key_frames',cuts.map(n=>String(n/fps)).join(','),'-f','segment','-segment_frames',cuts.join(','),'-reset_timestamps','1',
           '-segment_format','mp4','-segment_format_options','video_track_timescale=60000:movie_timescale=60000','-y','sequence-%d.mp4'];
-      await m.process(['-copyts','-fflags','+genpts','-threads',threads,'-f','flv','-i','pipe:0','-map','0:v:0','-an','-filter_threads',threads,'-vf',chain,
+      await m.processExportVideo(['-copyts','-fflags','+genpts','-threads',threads,'-f','flv','-i','pipe:0','-map','0:v:0','-an','-filter_threads',threads,'-vf',chain,
         ...plan.profile.arguments,'-frames:v',String(span.frames),'-r',String(fps),...output],
       {cwd:workDir,input:sourceStream(this.store,source.id,readFrom,Math.min(span.to,options.readTo??span.to),{signal:options.signal}),signal:options.signal,background:options.background,stage:'render'});
       canceled(options.signal);
@@ -676,7 +676,7 @@ export class RenderPipeline {
       if(labels.length)await fs.writeFile(path.join(workDir,labelFile),linkmicAss(labels,plan.profile.width,plan.profile.height,{base,from,to,sourceWidth:info.width,sourceHeight:info.height}));
       const cards=await avatarFilter(this.store,labels,plan.profile.width,plan.profile.height,workDir,{base,from,to,sourceWidth:info.width,sourceHeight:info.height});
       const filters=[geometry,cards,labels.length?`ass=${labelFile}`:''].filter(Boolean).join(',');
-      await this.media.process(['-copyts','-threads','2','-f','flv','-i','pipe:0','-ss',String(Math.max(0,span.from-base)),'-t',String(span.duration),'-map','0:v:0','-an',
+      await this.media.processExportVideo(['-copyts','-threads','2','-f','flv','-i','pipe:0','-ss',String(Math.max(0,span.from-base)),'-t',String(span.duration),'-map','0:v:0','-an',
         ...(filters?['-vf',filters]:[]),...preparedEncoderArguments(encoder),'-r',String(plan.info.fps),'-movflags','+faststart','-y',name],
         {cwd:workDir,input:sourceStream(this.store,source.id,from,to)});
       files.push({file:path.join(workDir,name),duration:span.duration});

@@ -230,16 +230,47 @@ export class Media {
     return this.scheduled(interactive?'interactive':background?'background':'foreground',signal,
       ()=>this.processInternal(args,{...options,signal}),options.stage||'media');
   }
+  async processExportVideo(args, options) {
+    const index=args.findIndex(arg=>arg==='-vf'||arg==='-filter_complex');
+    if(index<0||Buffer.byteLength(args[index+1])<8192)return this.process(args,options);
+    // Large graphs exceed the Windows command-line limit even with shallow expressions.
+    const file=`filter-${randomUUID()}.txt`,location=path.join(options.cwd,file);
+    try{
+      await fs.writeFile(location,args[index+1],{flag:'wx'});
+      const fromFile=args[index]==='-vf'?'-/filter:v':'-/filter_complex';
+      return await this.process([...args.slice(0,index),fromFile,file,...args.slice(index+2)],options);
+    }finally{
+      await fs.unlink(location).catch(()=>{});
+    }
+  }
   processInternal(args, { input, output, signal, progress, cwd, background=false, interactive=false, idleMs=120000 } = {}) {
     signal=Media.prototype.exportSignal.call(this,signal);
     const exportSignal=this.exportContext?.getStore()?.controller.signal;
     if(this.closed)return Promise.reject(new Error('视频服务已关闭。'));
     if(signal?.aborted)return Promise.reject(Object.assign(new Error('处理已取消。'),{name:'AbortError'}));
     const child = this.spawnTracked(this.ffmpeg, ['-hide_banner','-loglevel','warning','-nostdin','-progress','pipe:3','-nostats',...args], { cwd, windowsHide: true, stdio: ['pipe', output ? 'pipe' : 'ignore', 'pipe','pipe'] },cwd);
-    this.children.add(child);if(background)this.backgroundChildren.add(child);if(interactive)this.interactiveChildren.add(child); let log = '';
+    this.children.add(child);if(background)this.backgroundChildren.add(child);if(interactive)this.interactiveChildren.add(child); let log = '', diagnosticTail='', expressionFilter, failedEnable=false, expressionMemoryError=false;
     try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
-    child.stderr.on('data', b => { log = (log+b).slice(-16000); progress?.(log); });
-    const done = new Promise((resolve, reject) => { let spawnError;child.once('error', error=>{spawnError=error;}); child.once('close', code => { this.children.delete(child);this.backgroundChildren.delete(child);this.interactiveChildren.delete(child); if (signal?.aborted) resolve(); else if(spawnError)reject(spawnError);else if(code===0)resolve();else reject(new Error(`视频处理失败 (${code})：${log.slice(-1200)}`)); }); });
+    child.stderr.on('data', bytes => {
+      const diagnostic=diagnosticTail+bytes;
+      diagnosticTail=diagnostic.slice(-256);
+      expressionFilter??=/\[(?:Parsed_)?(overlay|drawbox)(?:_\d+)? @ [^\]\r\n]+\] Error when evaluating the expression/.exec(diagnostic)?.[1];
+      failedEnable||=/' for enable(?:\s|$)/.test(diagnostic);
+      expressionMemoryError||=diagnostic.includes('Cannot allocate memory');
+      log=(log+bytes).slice(-16000);progress?.(log);
+    });
+    const done = new Promise((resolve, reject) => {
+      let spawnError;
+      child.once('error',error=>{spawnError=error;});
+      child.once('close',code=>{
+        this.children.delete(child);this.backgroundChildren.delete(child);this.interactiveChildren.delete(child);
+        if(signal?.aborted||code===0)resolve();
+        else if(spawnError)reject(spawnError);
+        else if(expressionFilter&&failedEnable&&expressionMemoryError)
+          reject(Object.assign(new Error('FFmpeg 无法解析叠加效果的时间条件。'),{code:'EXPORT_OVERLAY_EXPRESSION',filter:expressionFilter}));
+        else reject(new Error(`视频处理失败 (${code})：${log.slice(-1200)}`));
+      });
+    });
     const inputStream = input ? Readable.from(input,{objectMode:false,highWaterMark:256*1024}) : null;
     // Mark cancellation as an error on the readable as well as closing stdin.
     // A normal destroy racing its async iterator's final read can leave Node's
@@ -788,83 +819,154 @@ export class Media {
     let outputOffset=0;
     const totalDuration=segments.reduce((sum,segment)=>sum+segment.to-segment.from,0),singlePart=segments.length===1;
     for(const {source,from,to} of segments) {
-        const base=seekBase(this.store,source.id,from); if(base===undefined) throw new Error('选段没有可用关键帧。');
-        const number=parts.length,subFile=`part-${number}.ass`,out=singlePart?'final.mp4':`part-${number}.mp4`,bakedOut=singlePart?'final-danmaku.mp4':`part-${number}-danmaku.mp4`;
+      const number=parts.length,out=singlePart?'final.mp4':`part-${number}.mp4`;
+      const bakedOut=singlePart?'final-danmaku.mp4':`part-${number}-danmaku.mp4`;
+      const sourceInfo=source.id===first.id?info:await this.probeSource(source,from);
+      const base=seekBase(this.store,source.id,from);
+      if(base===undefined)throw new Error('选段没有可用关键帧。');
+      const fps=normalizedDanmakuStyle(job.danmakuStyle).fps;
+      const labels=(job.linkmicEvents||[]).filter(event=>event.source===source.id&&event.participants.length&&event.time<to&&event.end>from);
+      const compatibleFull=!prepared.disableStreamCopy&&(prepared.sourcePlan?.canCopyStreams??true)&&singlePart&&canCopyFullSource(job,sources,sourceInfo,base);
+      let copyClean=!bakedOnly&&!labels.length&&compatibleFull&&(prepared.sourcePlan?.canCopyOriginal??true);
+      let copyAudio=compatibleFull&&sourceInfo.audioStreams===1&&sourceInfo.audioCodec==='aac'&&!job.audioStreamCopyFallback;
+      const splitKey=hashRender([source.id,from,to]);
+      const frameCount=(start,end,rate)=>Math.round((end-from)*rate)-Math.round((start-from)*rate);
+      let lastProgress=0;
+      const renderRange=async({from:start,to:end,out,bakedOut,videoOnly=false,stem})=>{
+        const base=seekBase(this.store,source.id,start);
+        if(base===undefined)throw new Error('选段没有可用关键帧。');
+        const subFile=`${stem}.ass`,labelFile=`names-${stem}.ass`;
+        const shownLabels=labels.filter(event=>event.time<end&&event.end>start);
         if(dual||bakedOnly) {
-          const messages=visibleComments(chatLayout,{excluded,filterLottery:job.filterLottery!==false},from,to);
-          // ASS runs before the output seek, so its clock starts at the preceding keyframe.
-          await fs.writeFile(path.join(workDir,subFile),assText(messages.map(m=>({...m,time:m.time-base,end:m.end-base})),width,height,job.font,job.danmakuStyle)+giftAss(job.gifts||[],width,height,{base,from,to}));
+          const messages=visibleComments(chatLayout,{excluded,filterLottery:job.filterLottery!==false},start,end);
+          // ASS uses the input clock, which starts at the preceding keyframe.
+          await fs.writeFile(path.join(workDir,subFile),assText(messages.map(m=>({...m,time:m.time-base,end:m.end-base})),width,height,job.font,job.danmakuStyle)+giftAss(job.gifts||[],width,height,{base,from:start,to:end}));
         }
-        const sourceInfo=source.id===first.id?info:await this.probeSource(source,from);
-        const filter=recordingLayoutFilter(blockCameraEvents(job.cameraEvents,source.id,from,to),job.recordingStyle??originalRecordingStyle(),width,height,
-          {sourceWidth:sourceInfo.width,sourceHeight:sourceInfo.height,base,from,to,fallback:videoGeometryFilter(sourceInfo,width,height)||'null'});
-        const labels=(job.linkmicEvents||[]).filter(event=>event.source===source.id&&event.participants.length&&event.time<to&&event.end>from);
-        const labelFile=`names-${number}.ass`;
-        if(labels.length)await fs.writeFile(path.join(workDir,labelFile),linkmicAss(labels,width,height,{base,from,to,sourceWidth:sourceInfo.width,sourceHeight:sourceInfo.height}));
-        const cardOptions={base,from,to,sourceWidth:sourceInfo.width,sourceHeight:sourceInfo.height};
-        const withNames=async prefix=>[await avatarFilter(this.store,labels,width,height,workDir,{...cardOptions,prefix}),labels.length?`ass=${labelFile}`:''].filter(Boolean).join(',');
+        const cameraEvents=blockCameraEvents(job.cameraEvents,source.id,start,end);
+        const filter=recordingLayoutFilter(cameraEvents,job.recordingStyle??originalRecordingStyle(),width,height,
+          {sourceWidth:sourceInfo.width,sourceHeight:sourceInfo.height,base,from:start,to:end,fallback:videoGeometryFilter(sourceInfo,width,height)||'null'});
+        const cardOptions={base,from:start,to:end,sourceWidth:sourceInfo.width,sourceHeight:sourceInfo.height};
+        if(shownLabels.length)await fs.writeFile(path.join(workDir,labelFile),linkmicAss(shownLabels,width,height,cardOptions));
+        const withNames=async prefix=>[await avatarFilter(this.store,shownLabels,width,height,workDir,{...cardOptions,prefix}),shownLabels.length?`ass=${labelFile}`:''].filter(Boolean).join(',');
         const labelFilter=await withNames('cleanmic'),danmakuLabelFilter=dual?await withNames('danmic'):labelFilter;
-        const fps=normalizedDanmakuStyle(job.danmakuStyle).fps;
-        const giftFilter=await giftIconFilter(job.gifts||[],job.giftIcons,width,height,workDir,{base,from,to});
+        const giftFilter=await giftIconFilter(job.gifts||[],job.giftIcons,width,height,workDir,{base,from:start,to:end});
+        const padding=videoOnly?',tpad=stop_mode=clone:stop_duration=0.2':'';
         const overlayFilter=`fps=${fps},ass=${subFile}${fontDirectory?':fontsdir='+fontDirectory:''}`+(giftFilter?','+giftFilter:'');
-        const compatibleFull=!prepared.disableStreamCopy&&(prepared.sourcePlan?.canCopyStreams??true)&&singlePart&&canCopyFullSource(job,sources,sourceInfo,base);
-        let copyClean=!bakedOnly&&!labels.length&&compatibleFull&&(prepared.sourcePlan?.canCopyOriginal??true);
-        let copyAudio=compatibleFull&&sourceInfo.audioStreams===1&&sourceInfo.audioCodec==='aac'&&!job.audioStreamCopyFallback;
-        const mux=singlePart?['-movflags','+faststart']:[];
-        const encode=(map,file,baked=false)=>['-ss',String(Math.max(0,from-base)),'-t',String(to-from),'-map',map,'-map','0:a:0?',
-          ...encoderArguments(encoder,dual&&!copyClean),'-pix_fmt','yuv420p','-r',String(baked?fps:info.fps),
-          ...(copyAudio?['-c:a','copy']:['-c:a','aac','-b:a','192k']),...mux,'-y',file];
-        const copied=file=>['-t',String(to-from),'-map','0:v:0','-map','0:a:0?',
-          ...(job.audioStreamCopyFallback?['-c:v','copy','-c:a','aac','-b:a','192k']:['-c','copy']),...mux,'-y',file];
-        const command=()=>{
-          let filters=[],outputs;
-          if(dual) {
-            const split=labelFilter?`split=2[plain][overlay];[plain]${labelFilter}[clean];[overlay]${overlayFilter},${danmakuLabelFilter}[danmaku]`
-              :`split=2[clean][overlay];[overlay]${overlayFilter}[danmaku]`;
-            const graph=copyClean?`[0:v:0]${overlayFilter}[danmaku]`:`[0:v:0]${filter?filter+',':''}${split}`;
-            filters=['-filter_complex_threads','2','-filter_complex',graph];
-            outputs=[...(copyClean?copied(out):encode('[clean]',out)),...encode('[danmaku]',bakedOut,true)];
-          } else if(copyClean)outputs=copied(out);
-          else {
-            const chain=[filter,...(bakedOnly?[overlayFilter]:[]),labelFilter].filter(Boolean).join(',');
-            if(chain)filters=['-filter_threads','2','-vf',chain];
-            outputs=encode('0:v:0',out,bakedOnly);
-          }
-          return ['-stats_period','1','-progress','pipe:2','-nostats','-fflags','+genpts','-threads','2','-f','flv','-i','pipe:0',...filters,...outputs];
+        const mux=singlePart&&!videoOnly?['-movflags','+faststart']:[];
+        const audio=videoOnly?['-an']:['-map','0:a:0?',...(copyAudio?['-c:a','copy']:['-c:a','aac','-b:a','192k'])];
+        const encode=(map,file,baked=false)=>{
+          const rate=baked?fps:info.fps;
+          const limit=videoOnly?['-frames:v',String(frameCount(start,end,rate))]:['-t',String(end-start)];
+          return ['-ss',String(Math.max(0,start-base)),...limit,'-map',map,
+            ...encoderArguments(encoder,dual&&!copyClean),'-pix_fmt','yuv420p','-r',String(rate),...audio,...mux,'-y',file];
         };
-        let lastProgress=0;
-        const render=()=>this.process(command(),
-            {cwd:workDir,input:sourceStream(this.store,source.id,from,to),stage:copyClean&&job.mode==='clean'?'copy':'render',progress:log=>{
+        const copied=file=>['-t',String(end-start),'-map','0:v:0','-map','0:a:0?',
+          ...(job.audioStreamCopyFallback?['-c:v','copy','-c:a','aac','-b:a','192k']:['-c','copy']),...mux,'-y',file];
+        let filters=[],outputs;
+        if(dual) {
+          const bakedFilter=[overlayFilter,danmakuLabelFilter].filter(Boolean).join(',')+padding;
+          const cleanFilter=(labelFilter||'null')+padding;
+          const split=labelFilter||videoOnly
+            ?`split=2[plain][overlay];[plain]${cleanFilter}[clean];[overlay]${bakedFilter}[danmaku]`
+            :`split=2[clean][overlay];[overlay]${bakedFilter}[danmaku]`;
+          const graph=copyClean?`[0:v:0]${overlayFilter}[danmaku]`:`[0:v:0]${filter?filter+',':''}${split}`;
+          filters=['-filter_complex_threads','2','-filter_complex',graph];
+          outputs=[...(copyClean?copied(out):encode('[clean]',out)),...encode('[danmaku]',bakedOut,true)];
+        } else if(copyClean)outputs=copied(out);
+        else {
+          const chain=[filter,...(bakedOnly?[overlayFilter]:[]),labelFilter].filter(Boolean).join(',');
+          if(chain||videoOnly)filters=['-filter_threads','2','-vf',(chain||'null')+padding];
+          outputs=encode('0:v:0',out,bakedOnly);
+        }
+        try{
+          await this.processExportVideo(['-stats_period','1','-progress','pipe:2','-nostats','-fflags','+genpts','-threads','2','-f','flv','-i','pipe:0',...filters,...outputs],
+            {cwd:workDir,input:sourceStream(this.store,source.id,start,end),stage:copyClean&&job.mode==='clean'?'copy':'render',progress:log=>{
               if(this.closed)return;
               const matches=[...log.matchAll(/(?:^|\n)out_time_us=(\d+)/g)],seconds=Number(matches.at(-1)?.[1])/1000000;
-              if(!Number.isFinite(seconds)||Date.now()-lastProgress<750)return;lastProgress=Date.now();
-              this.store.run('UPDATE jobs SET progress=MAX(progress,?) WHERE id=?',Math.min(.94,.01+.93*(outputOffset+Math.max(0,Math.min(to-from,seconds)))/totalDuration),job.id);
+              if(!Number.isFinite(seconds)||Date.now()-lastProgress<750)return;
+              lastProgress=Date.now();
+              const progress=outputOffset+(start-from)+Math.max(0,Math.min(end-start,seconds));
+              this.store.run('UPDATE jobs SET progress=MAX(progress,?) WHERE id=?',Math.min(.94,.01+.93*progress/totalDuration),job.id);
             }});
-        const renderWithAudioFallback=async()=>{
-          try{await render();}catch(error){
-            // Only an explicit AAC packet/header rejection invalidates audio
-            // copying. GPU failures keep the same audio path on the CPU retry.
-            if(this.closed||!copyAudio||!/(?:malformed AAC bitstream|AAC bitstream[^\r\n]*(?:ADTS|extradata)|could not find tag for codec aac)/i.test(error.message))throw error;
-            copyAudio=false;job.audioStreamCopyFallback=true;await render();
+        }catch(error){
+          if(error.code==='EXPORT_OVERLAY_EXPRESSION'){
+            const layers=error.filter==='drawbox'?['连麦头像']:[
+              ...(filter?.includes("enable=")?['摄像头布局']:[]),
+              ...(labelFilter.includes("enable=")?['连麦头像']:[]),
+              ...(giftFilter?['礼物图标']:[])
+            ];
+            error.message=`录像 ${start.toFixed(3)}–${end.toFixed(3)} 秒，${layers.join('、')||error.filter||'画面叠加'}的时间条件无法处理。`;
           }
+          throw error;
+        }
+      };
+      const renderWhole=()=>renderRange({from,to,out,bakedOut,stem:`part-${number}`});
+      const renderWithAudioFallback=async()=>{
+        try{await renderWhole();}catch(error){
+          if(this.closed||!copyAudio||!/(?:malformed AAC bitstream|AAC bitstream[^\r\n]*(?:ADTS|extradata)|could not find tag for codec aac)/i.test(error.message))throw error;
+          copyAudio=false;job.audioStreamCopyFallback=true;await renderWhole();
+        }
+      };
+      const overlayFailure=error=>['EXPORT_OVERLAY_EXPRESSION','CAMERA_LAYOUT_COMPLEX'].includes(error.code);
+      const renderSplit=async()=>{
+        copyClean=false;copyAudio=false;job.cleanStreamCopy=false;
+        const files=[],bakedFiles=[],failedBlocks=new Set(job.overlaySplitParts?.[splitKey]||[]);
+        const splitBlock=async(start,end,block)=>{
+          this.assertExportActive();
+          const stem=`part-${number}-block-${block}`,file=stem+'.mp4',baked=stem+'-danmaku.mp4';
+          if(!failedBlocks.has(block))try{
+            await checkpoint.run(stem,()=>renderRange({from:start,to:end,out:file,bakedOut:baked,videoOnly:true,stem}),dual?[file,baked]:[file]);
+            const rate=bakedOnly?fps:info.fps;
+            files.push({file:path.join(workDir,file),duration:frameCount(start,end,rate)/rate});
+            if(dual)bakedFiles.push({file:path.join(workDir,baked),duration:frameCount(start,end,fps)/fps});
+            return;
+          }catch(error){
+            this.assertExportActive();
+            if(!overlayFailure(error)||this.closed||end-start<=2||block.split('-').length>=7)throw error;
+            failedBlocks.add(block);
+            job.overlaySplitParts[splitKey]=[...failedBlocks];this.persistExportJob(job);
+          }
+          const cut=start+Math.max(1,Math.floor((end-start)/2));
+          await splitBlock(start,cut,block+'-0');
+          await splitBlock(cut,end,block+'-1');
         };
-        await checkpoint.run('part-'+number,async()=>{
+        const length=to-from,step=length>60?60:Math.max(1,Math.floor(length/2));
+        for(let block=0;;block++){
+          const start=from+block*step,next=start+step;
+          const end=to-next<1?to:next;
+          await splitBlock(start,end,String(block));
+          if(end===to)break;
+        }
+        // Encode the parent span's audio once. Per-block AAC would round and
+        // introduce encoder delay at every splice.
+        const audio=await this.renderer.audio([{source,from,to}],{sources:[source],info:sourceInfo,profile:{fps:bakedOnly?fps:info.fps},sourceExport:{canCopyStreams:false}},workDir,job);
+        await this.renderer.mux(files,audio,out,workDir,`split-${number}.txt`);
+        if(dual)await this.renderer.mux(bakedFiles,audio,bakedOut,workDir,`split-${number}-danmaku.txt`);
+      };
+      const wasSplit=Object.hasOwn(job.overlaySplitParts||{},splitKey);
+      if(wasSplit){copyClean=false;copyAudio=false;}
+      await checkpoint.run('part-'+number,async()=>{
+        if(wasSplit)return renderSplit();
         try {await renderWithAudioFallback();}
         catch(error) {
           this.assertExportActive();
           if(this.closed||mediaFailure(error)==='action'||mediaFailure(error)==='temporary')throw error;
+          if(overlayFailure(error)) {
+            if(to-from<=2)throw error;
+            job.overlaySplitParts??={};job.overlaySplitParts[splitKey]=[];this.persistExportJob(job);
+            this.store.diagnostics?.record('导出分段重试',error.message,{level:'警告'});
+            return renderSplit();
+          }
           if(copyClean) {
-            // A compatible probe is conservative, but a muxer can still reject
-            // a damaged stream. Retry the same complete part with normal encode.
             if(!dual){error.originalCopyFailure=true;throw error;}
             copyClean=false;job.streamCopyFallback=true;job.cleanStreamCopy=false;job.cleanEncodingReason=error.message;
-            try{await renderWithAudioFallback();}catch(fallback){if(encoder.hardware&&mediaFailure(fallback)!=='action'&&mediaFailure(fallback)!=='temporary')fallback.hardwareEncoderFailure=true;throw fallback;}
+            try{await renderWithAudioFallback();}catch(fallback){if(encoder.hardware&&!overlayFailure(fallback)&&mediaFailure(fallback)!=='action'&&mediaFailure(fallback)!=='temporary')fallback.hardwareEncoderFailure=true;throw fallback;}
           } else {if(encoder.hardware)error.hardwareEncoderFailure=true;throw error;}
         }
-        },dual?[out,bakedOut]:[out]);
-        if(copyClean)job.cleanStreamCopy=true;
-        if(copyAudio)job.audioStreamCopy=true;else delete job.audioStreamCopy;
-        parts.push(out); outputOffset+=to-from;
+      },dual?[out,bakedOut]:[out]);
+      if(copyClean)job.cleanStreamCopy=true;
+      if(copyAudio)job.audioStreamCopy=true;else delete job.audioStreamCopy;
+      parts.push(out);outputOffset+=to-from;
       this.store.run('UPDATE jobs SET progress=MAX(progress,?) WHERE id=?',Math.min(.94,.01+.93*outputOffset/totalDuration),job.id);
     }
     this.store.run("UPDATE jobs SET status='finalizing',progress=.95 WHERE id=?",job.id);

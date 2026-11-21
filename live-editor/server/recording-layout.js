@@ -1,3 +1,4 @@
+import { overlayTimeExpression } from './overlay-time.js';
 import {cameraLayout,cameraGeometry,normalizedRecordingStyle} from '../shared/recording-style.js';
 
 export function biliCameraLayout(value) {
@@ -71,7 +72,7 @@ export function recordingLayoutFilter(events,style,width,height,{sourceWidth=wid
   lines.push(`[${prefix}raw]${fallback||'null'}[${prefix}base0]`);
   for(const [{g,intervals},i]of [...groups.values()].map((g,i)=>[g,i])) {
     const id=ids[i],a=g.main,b=g.camera,m=g.mainTarget,c=g.cameraTarget;
-    const enable=intervals.map(([a,b])=>`gte(t,${a.toFixed(6)})*lt(t,${b.toFixed(6)})`).join('+');
+    const enable=overlayTimeExpression(intervals,6);
     lines.push(`[${id}src]split=2[${id}main][${id}cam]`);
     lines.push(`[${id}main]crop=${a.w}:${a.h}:${a.x}:${a.y},scale=${m.w}:${m.h},pad=${width}:${height}:${m.x}:${m.y}:black,setsar=1[${id}full]`);
     lines.push(`[${id}cam]crop=${b.w}:${b.h}:${b.x}:${b.y},scale=${c.w}:${c.h},setsar=1[${id}small]`);

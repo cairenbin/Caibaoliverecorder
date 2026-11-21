@@ -1,3 +1,4 @@
+import { overlayTimeExpression } from './overlay-time.js';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -86,7 +87,7 @@ export async function avatarFilter(store,events,width,height,workDir,{base=0,fro
   }
   const filters=[];let n=0;
   for(const {g,source,avatar,intervals} of cards.values()) {
-    const enable=intervals.map(([a,b])=>`gte(t,${a.toFixed(4)})*lt(t,${b.toFixed(4)})`).join('+');
+    const enable=overlayTimeExpression(intervals,4);
     filters.push(`drawbox=x=${Math.round(g.left)}:y=${Math.round(g.top)}:w=${Math.round(g.right-g.left)}:h=${Math.round(g.bottom-g.top)}:color=0x35353d@0.80:t=fill:enable='${enable}'`);
     const png=/^[a-f0-9]{64}$/.test(avatar||'')?store.get('SELECT png FROM linkmic_avatars WHERE source=? AND hash=?',source,avatar)?.png:null;
     if(!png)continue;

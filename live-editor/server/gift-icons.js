@@ -1,3 +1,4 @@
+import { overlayTimeExpression } from './overlay-time.js';
 import {createHash} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -82,7 +83,7 @@ export async function giftIconFilter(gifts,icons,width,height,workDir,{base=0,fr
   for(const {key,lane,intervals} of entries.values()){
     const g=giftGeometry(width,height,lane),file=`gift-${key}.png`,name='gift'+n++;
     await fs.writeFile(path.join(workDir,file),Buffer.from(icons[key],'base64'));
-    const enable=intervals.map(([a,b])=>`gte(t,${Math.max(0,a-base).toFixed(4)})*lt(t,${(b-base).toFixed(4)})`).join('+');
+    const enable=overlayTimeExpression(intervals.map(([start,end])=>[Math.max(0,start-base),end-base]),4);
     filters.push(`null[${name}v];movie=${file},scale=${Math.round(g.icon)}:${Math.round(g.icon)}[${name}i];[${name}v][${name}i]overlay=x=${Math.round(g.x+g.pad)}:y=${Math.round(g.y+(g.h-g.icon)/2)}:eof_action=repeat:enable='${enable}'`);
   }
   return filters.join(',');
