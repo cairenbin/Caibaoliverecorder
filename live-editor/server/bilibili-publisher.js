@@ -54,6 +54,24 @@ const rejectedDraft = new Set([123008, 123009, 123010, 123012, 123013, 123014, 1
   123022, 123024, 123029, 123030, 123033, 123050, 123051]);
 const validId = value => typeof value === 'string' && /^[a-z0-9-]{1,128}$/i.test(value);
 const numericId = value => /^[1-9]\d*$/.test(String(value)) && Number.isSafeInteger(Number(value));
+const categoryLifetime = 15 * 60 * 1000;
+const categoryUnavailable = '暂时无法读取 B站投稿分区，请检查网络后重试。';
+
+function categoryOption(value) {
+  const id = String(value?.id ?? '');
+  const name = typeof value?.name === 'string' ? value.name.trim() : '';
+  if (value?.show === false || !/^[1-9]\d{0,8}$/.test(id) || !name) return null;
+  return { id, name };
+}
+
+function archiveCategories(archive) {
+  if (!Array.isArray(archive?.typelist)) return [];
+  return archive.typelist.flatMap(group => {
+    const option = categoryOption(group);
+    const children = Array.isArray(group?.children) ? group.children.map(categoryOption).filter(Boolean) : [];
+    return option && children.length ? [{ ...option, children }] : [];
+  });
+}
 
 function loadBundledSdk() {
   const packaged = new URL('./bilibili-upload-sdk.cjs', import.meta.url);
@@ -106,6 +124,7 @@ function untilAbort(signal, work) {
 export class BilibiliPublisher {
   #active = null;
   #sdk;
+  #categoryCatalog;
   #closed = false;
 
   constructor(store, credentials, { loadSdk = loadBundledSdk } = {}) {
@@ -143,6 +162,52 @@ export class BilibiliPublisher {
     return { uid: status.accountUid, name: '' };
   }
 
+  async categories(uid) {
+    const account = await this.account();
+    if (uid !== undefined && account.uid !== uid) throw new PublicationError('B站投稿账号已改变，请重新打开设置。');
+    const raw = this.credentials.get('bilibili');
+    let cached = this.#categoryCatalog;
+    if (!cached || cached.raw !== raw || cached.expires <= Date.now()) {
+      cached = { raw, expires: Infinity };
+      this.#categoryCatalog = cached;
+      cached.result = this.readCategories(raw, account.uid).then(categories => {
+        cached.expires = Date.now() + categoryLifetime;
+        return categories;
+      }).catch(error => {
+        if (this.#categoryCatalog === cached) this.#categoryCatalog = undefined;
+        throw error;
+      });
+    }
+    const categories = await cached.result;
+    if (raw !== this.credentials.get('bilibili') || !this.snapshot().configured) {
+      throw new PublicationError('B站 Cookie 或投稿账号已改变，请重新打开设置。');
+    }
+    return categories;
+  }
+
+  async readCategories(raw, uid) {
+    const signal = AbortSignal.timeout(8000);
+    try {
+      const sdk = this.#sdk ??= await untilAbort(signal, () => this.loadSdk());
+      const client = new sdk.Client();
+      await client.setAuth(publicationCredentials(raw), Number(uid));
+      const platform = client.platform;
+      requestOptions(platform.request, signal, 8000);
+      const categories = archiveCategories(await untilAbort(signal, () => platform.getArchivePre()));
+      if (categories.length) return categories;
+    } catch (error) {
+      throw new PublicationError(definiteRejection(error, this.#sdk) || categoryUnavailable);
+    }
+    throw new PublicationError(categoryUnavailable);
+  }
+
+  async assertCategory(categoryId, uid) {
+    const categories = await this.categories(uid);
+    if (!categories.some(group => group.children.some(option => option.id === String(categoryId)))) {
+      throw new PublicationError('该 B站投稿分区不可选，请重新选择分区。');
+    }
+  }
+
   async fileIdentity(file) {
     if (['originals', 'archives', 'chunks', 'temp', 'profile', 'runtime', 'private-credentials'].some(folder =>
       inside(path.join(this.store.root, folder), file))) {
@@ -169,6 +234,7 @@ export class BilibiliPublisher {
       }
       Object.assign(part, receipt);
     }
+    await this.assertCategory(metadata.tid, account.uid);
     const current = this.snapshot();
     if (!current.configured || current.accountUid !== account.uid) throw new PublicationError('B站投稿账号已改变，请重新核对。');
     if (this.#closed) throw new PublicationError('程序正在退出，请稍后重试。');

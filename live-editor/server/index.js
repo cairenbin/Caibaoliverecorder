@@ -192,6 +192,9 @@ async function createManagedApp(options,runtime) {
       }
       if(p==='/api/follow-users'&&req.method==='POST')return json(res,await recorder.douyin.following.add((await body(req)).url));
       if(p==='/api/anchors'&&req.method==='POST')return json(res,await recorder.addAnchor(await body(req)));
+      if(p==='/api/bilibili-publication-categories'&&req.method==='GET'){
+        return json(res,{categories:await publisher.categories()});
+      }
       const quickJob=/^\/api\/jobs\/([a-z0-9-]{1,64})\/quick-publish$/i.exec(p);
       if(quickJob) {
         if(req.method==='GET')return json(res,await quickPublish.details(quickJob[1]));

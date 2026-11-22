@@ -30,7 +30,7 @@ function normalize(input) {
   }
   if (input.enabled && publicationDescription(description, homepage).length > 2000) throw new Error('简介与主播主页合计最多 2000 个字符。');
   const categoryId = String(input.categoryId ?? '');
-  if ((categoryId || input.enabled) && !/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请填写有效的 B站投稿分区。');
+  if ((categoryId || input.enabled) && !/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请选择 B站投稿分区。');
   const copyright = Number(input.copyright ?? 2);
   if (![1, 2].includes(copyright)) throw new Error('请选择自制或转载。');
   const source = input.source === undefined ? '' : text('source', 200);
@@ -63,6 +63,9 @@ export class AutoPost {
       if (next.enabled) {
         if (!publication.configured || !uid) throw new Error(publication.accountError || 'B站 Cookie 当前不可用。');
         if (String(input.accountUid) !== uid) throw new Error('投稿账号已改变，请重新打开设置。');
+        await this.publisher.assertCategory(next.categoryId, uid);
+        if (!this.anchors().some(item => item.key === key)) throw new Error('找不到这个 B站监控主播。');
+        stored = this.store.setting(settingsKey(room)) || defaults;
       }
       const retainTime = next.enabled && stored.live && stored.enabled && stored.uid === uid;
       const enabledAt = retainTime ? stored.enabledAt : Math.max(Date.now(), (stored.enabledAt || 0) + 1);

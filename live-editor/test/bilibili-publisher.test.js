@@ -56,6 +56,18 @@ async function fixture(t) {
       const request = { defaults: {} };
       return {
         request,
+        async getArchivePre() {
+          requests.push(['categories', { ...request.defaults }]);
+          await state.onCategories?.();
+          return { typelist: [
+            { id: 1, name: '动画', children: [
+              { id: 171, name: '综合', notice: 'internal response field' },
+              { id: 172, name: '已隐藏', show: false },
+            ] },
+            { id: 4, name: '游戏', children: [{ id: 17, name: '单机游戏' }] },
+            { id: 5, name: '无可选子分区', children: [] },
+          ] };
+        },
         async addMediaWebApiV3(parts, options) {
           requests.push(['commit', parts, options, { ...request.defaults }]);
           if (state.commit) return state.commit();
@@ -109,6 +121,28 @@ test('detects whether the saved recording Cookie supports posting without networ
   assert.deepEqual(requests, []);
 });
 
+test('only offers visible Bilibili subcategories and revalidates after a Cookie change', async t => {
+  const { publisher, requests, state, files, BiliResponseError } = await fixture(t);
+  const [catalog, shared] = await Promise.all([publisher.categories(), publisher.categories()]);
+  assert.deepEqual(catalog, [
+    { id: '1', name: '动画', children: [{ id: '171', name: '综合' }] },
+    { id: '4', name: '游戏', children: [{ id: '17', name: '单机游戏' }] },
+  ]);
+  assert.deepEqual(shared, catalog);
+  for (const tid of [1, 172, 999999]) {
+    await assert.rejects(publisher.submit({ ...request(files), config: { ...article, tid } }), /分区不可选/);
+  }
+  assert.deepEqual(requests.map(row => row[0]), ['auth', 'categories']);
+  assert.equal(requests[1][1].maxRedirects, 0);
+  assert.equal(requests[1][1].httpsAgent.options.rejectUnauthorized, true);
+  state.cookie = cookie.replace('test-session', 'updated-session');
+  state.onCategories = () => { throw new BiliResponseError(-101); };
+  await assert.rejects(publisher.categories(), { message: 'B站 Cookie 已失效，请在设置中更新后重试。' });
+  state.onCategories = undefined;
+  assert.deepEqual(await publisher.categories(), catalog);
+  assert.equal(requests.filter(row => row[0] === 'categories').length, 3);
+});
+
 test('arms only recorded tasks, sends one final ordered post, and preserves exports', async t => {
   const { publisher, requests, files, store } = await fixture(t);
   let checked = false;
@@ -118,7 +152,8 @@ test('arms only recorded tasks, sends one final ordered post, and preserves expo
   assert.equal(taskRow(store, queued.taskId).status, 'staged');
   assert.equal(publisher.hasWork(), false);
   await publisher.tick(allow);
-  assert.deepEqual(requests, []);
+  assert.deepEqual(requests.map(row => row[0]), ['auth', 'categories']);
+  requests.length = 0;
   assert.equal((await publisher.task(queued.taskId, queued.target)).status, 'queued');
   assert.equal(publisher.hasWork(), true);
   await publisher.tick((candidate, thisUid, taskId) => {
@@ -153,6 +188,7 @@ test('validates exported files and input before sending requests', async t => {
   await assert.rejects(publisher.submit(request([files[0], files[0]])), /路径重复/);
   await assert.rejects(publisher.submit(request([{ ...files[0], identity: 'mismatched prior receipt' }])), /成片已发生变化/);
   await assert.rejects(publisher.submit({ ...request(files), config: { ...article, source: '长'.repeat(201) } }), /转载/);
+  assert.deepEqual(requests, []);
   await assert.rejects(publisher.submit({ ...request(files), beforeSend() { throw new Error('用户设置已改变'); } }), /设置已改变/);
   const posted = await publisher.submit(request(files));
   await publisher.task(posted.taskId);
@@ -160,7 +196,7 @@ test('validates exported files and input before sending requests', async t => {
   await publisher.tick(allow);
   assert.match((await publisher.task(posted.taskId)).error, /成片已发生变化/);
   assert.equal((await publisher.task(posted.taskId)).canRetry, true);
-  assert.deepEqual(requests, []);
+  assert.deepEqual(requests.map(row => row[0]), ['auth', 'categories']);
 });
 
 test('detects account mismatch and consent removal before final posting', async t => {

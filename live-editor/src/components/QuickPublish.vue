@@ -5,6 +5,7 @@ import { ui } from '../../shared/ui-copy.js';
 import { api } from '../api.js';
 import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationStatus, publicationTags, publicationValidation } from '../bilibili-publication.js';
 import PublicationCopyright from './PublicationCopyright.vue';
+import PublicationCategory from './PublicationCategory.vue';
 
 const props = defineProps({ jobId: { type: String, required: true } });
 const emit = defineEmits(['busy', 'changed', 'close']);
@@ -20,6 +21,7 @@ const title = ref('');
 const description = ref('');
 const tagsText = ref('');
 const categoryId = ref('');
+const categoryValid = ref(false);
 const copyright = ref('');
 const source = ref('');
 const mode = ref('');
@@ -37,10 +39,10 @@ const variants = computed(() => publicationModes.filter(option => available.valu
 const accountLabel = computed(() => publicationAccountLabel(account.value));
 const tags = computed(() => publicationTags(tagsText.value));
 const validationError = computed(() => publicationValidation({
-  title: title.value.trim(), tags: tags.value, categoryId: categoryId.value, copyright: copyright.value, source: source.value,
+  title: title.value.trim(), tags: tags.value, copyright: copyright.value, source: source.value,
 }));
 const canPublish = computed(() => !locked.value && !!account.value?.uid && !accountError.value
-  && !!title.value.trim() && available.value.includes(mode.value) && !validationError.value);
+  && !!title.value.trim() && available.value.includes(mode.value) && categoryValid.value && !validationError.value);
 
 async function readDetails({ hydrate = false } = {}) {
   const details = await api(route, undefined, { signal: AbortSignal.any([request.signal, AbortSignal.timeout(12000)]) });
@@ -51,7 +53,7 @@ async function readDetails({ hydrate = false } = {}) {
     title.value = details.title || '';
     description.value = details.description || '';
     tagsText.value = (details.tags || []).join('，');
-    categoryId.value = details.categoryId ?? '';
+    categoryId.value = String(details.categoryId ?? '');
     copyright.value = details.copyright ? Number(details.copyright) : '';
     source.value = details.source || '';
     available.value = details.availableModes || [];
@@ -145,10 +147,7 @@ onBeforeUnmount(() => { request.abort(); clearTimeout(pollTimer); });
         {{ copy.标签 }}
         <input id="quick-publish-tags" v-model="tagsText" maxlength="200" :placeholder="copy.标签分隔"/>
       </label>
-      <label class="field-label" for="quick-publish-category">
-        {{ copy.投稿分区 }}
-        <input id="quick-publish-category" v-model="categoryId" type="number" min="1" max="999999999" step="1" required/>
-      </label>
+      <PublicationCategory v-model="categoryId" :account-uid="account?.uid && !accountError ? String(account.uid) : ''" @valid="categoryValid = $event"/>
       <PublicationCopyright v-model:copyright="copyright" v-model:source="source" field-prefix="quick-publish" required/>
       <fieldset class="quick-publish-versions">
         <legend>{{ copy.投稿版本 }}</legend>

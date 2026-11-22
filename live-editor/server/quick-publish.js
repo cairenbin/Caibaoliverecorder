@@ -22,7 +22,7 @@ function normalize(input) {
   }
   if (tags.join(',').length > 200) throw new Error('标签合计最多 200 个字符。');
   const categoryId = String(input.categoryId ?? '');
-  if (!/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请填写有效的 B站投稿分区。');
+  if (!/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请选择 B站投稿分区。');
   const copyright = Number(input.copyright);
   if (![1, 2].includes(copyright)) throw new Error('请选择自制或转载。');
   const source = typeof input.source === 'string' ? input.source.trim() : '';

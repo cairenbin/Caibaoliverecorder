@@ -36,6 +36,10 @@ async function verifyAutoPostMenu(page){
   autoPost:{...base.autoPost,cookieConfigured},bilibiliPublisher:{...base.bilibiliPublisher,configured:cookieConfigured,cookieConfigured,accountUid:cookieConfigured?account.uid:''}});
  await page.route('**/api/state',route=>route.fulfill({json:snapshot()}));
  await page.route('**/api/events',route=>route.fulfill({contentType:'text/event-stream',body:`data: ${JSON.stringify(snapshot())}\n\n`}));
+ await page.route('**/api/bilibili-publication-categories',route=>route.fulfill({json:{categories:[
+  {id:'1',name:'动画',children:[{id:'171',name:'综合'}]},
+  {id:'4',name:'游戏',children:[{id:'17',name:'单机游戏'}]}
+ ]}}));
  await page.route('**/api/anchors/*/auto-post',route=>route.fulfill({json:{
   enabled:false,titleTemplate:'A的直播回放｜{录制日期}',description:'示例简介',
   homepage:'https://space.bilibili.com/123',tags:['直播回放'],categoryId:171,mode:'danmaku',
@@ -59,6 +63,15 @@ async function verifyAutoPostMenu(page){
  await toggle.waitFor({state:'visible',timeout:5000});
  assert.equal(await toggle.isChecked(),false);
  await toggle.check();
+ const parent=form.getByRole('combobox',{name:'选择分区',exact:true});
+ const category=form.getByRole('combobox',{name:'选择子分区',exact:true});
+ const save=form.getByRole('button',{name:'保存',exact:true});
+ await category.locator('option:checked', { hasText: '综合' }).waitFor({state:'attached',timeout:5000});
+ assert.equal(await parent.inputValue(),'1');
+ await parent.selectOption({label:'游戏'});
+ assert.equal(await save.isEnabled(),false);
+ await category.selectOption({label:'单机游戏'});
+ assert.equal(await save.isEnabled(),true);
  const preview=form.locator('#auto-post-preview');
  await preview.waitFor({state:'visible',timeout:5000});
  assert.match(await preview.innerText(),/A的直播回放｜\d{1,2}月\d{1,2}日/);

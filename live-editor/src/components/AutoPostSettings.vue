@@ -6,6 +6,7 @@ import { POST_DATE_TOKEN, renderAutoPostTitle } from '../../shared/auto-post-tit
 import { api } from '../api.js';
 import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationTags, publicationValidation } from '../bilibili-publication.js';
 import PublicationCopyright from './PublicationCopyright.vue';
+import PublicationCategory from './PublicationCategory.vue';
 
 const props = defineProps({ anchor: { type: Object, required: true } });
 const emit = defineEmits(['busy', 'saved', 'close']);
@@ -18,6 +19,7 @@ const description = ref('');
 const homepage = ref('');
 const tagsText = ref('');
 const categoryId = ref('');
+const categoryValid = ref(false);
 const copyright = ref(2);
 const source = ref('');
 const mode = ref('danmaku');
@@ -38,11 +40,11 @@ const validationError = computed(() => {
   const intro = [description.value.trim(), profile ? `${copy.主播主页}：${profile}` : ''].filter(Boolean).join('\n');
   if (enabled.value && intro.length > 2000) return copy.简介与主页过长;
   return publicationValidation({
-    title: preview.value, tags: tags.value, categoryId: categoryId.value, copyright: copyright.value, source: source.value,
+    title: preview.value, tags: tags.value, copyright: copyright.value, source: source.value,
   }, enabled.value);
 });
 const canUseAccount = computed(() => !!account.value?.uid && !accountError.value);
-const valid = computed(() => !validationError.value && (!enabled.value || (!!preview.value && canUseAccount.value)));
+const valid = computed(() => !validationError.value && (!enabled.value || (!!preview.value && canUseAccount.value && categoryValid.value)));
 
 onMounted(async () => {
   try {
@@ -55,7 +57,7 @@ onMounted(async () => {
     description.value = settings.description || '';
     homepage.value = settings.homepage || '';
     tagsText.value = (settings.tags ?? []).join('，');
-    categoryId.value = settings.categoryId ?? '';
+    categoryId.value = String(settings.categoryId ?? '');
     mode.value = publicationModes.some(option => option.id === settings.mode) ? settings.mode : 'danmaku';
     copyright.value = Number(settings.copyright) === 1 ? 1 : 2;
     source.value = settings.source || '';
@@ -154,10 +156,7 @@ async function save() {
         {{ copy.标签 }}
         <input id="auto-post-tags" v-model="tagsText" maxlength="200" :disabled="saving" :placeholder="copy.标签分隔"/>
       </label>
-      <label class="field-label" for="auto-post-category">
-        {{ copy.投稿分区 }}
-        <input id="auto-post-category" v-model="categoryId" type="number" min="1" max="999999999" step="1" :required="enabled" :disabled="saving"/>
-      </label>
+      <PublicationCategory v-model="categoryId" :account-uid="canUseAccount ? String(account.uid) : ''" :disabled="saving" @valid="categoryValid = $event"/>
       <PublicationCopyright v-model:copyright="copyright" v-model:source="source" field-prefix="auto-post" :required="enabled" :disabled="saving"/>
     </div>
 

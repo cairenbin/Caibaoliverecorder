@@ -34,6 +34,7 @@ async function setup(t) {
       const configured = !!accountUid && credentials.cookie.includes('bili_jct=');
       return { configured, accountUid, ...(configured ? {} : { accountError: 'B站 Cookie 缺少 bili_jct。' }) };
     },
+    async assertCategory(id) { assert.equal(id, '171'); },
     async submit(input) { submitted.push(input); return { taskId: 'fixture-task' }; },
     async task(task) { assert.equal(task, 'fixture-task'); return { status: 'submitted', bvid: 'BVtest001' }; },
   };
@@ -59,6 +60,8 @@ test('只在已有 B站 Cookie 的 B站主播上开启，旧素材不加入自�
   autoPost.capture(earlier);
   assert.equal(autoPost.snapshot().jobs.length, 0);
   assert.doesNotMatch(JSON.stringify(await autoPost.settings(key)), /SESSDATA|synthetic/);
+  await autoPost.settings(key, { ...settings, enabled: false, categoryId: '1' });
+  assert.equal((await autoPost.settings(key)).enabled, false);
 });
 
 test('封口后只建一个导出任务，恢复后继续同一任务并按指定顺序提交双版本投稿', async t => {

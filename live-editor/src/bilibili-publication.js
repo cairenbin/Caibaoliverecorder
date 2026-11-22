@@ -20,12 +20,11 @@ export function preventImplicitPublication(event) {
   if (event.target instanceof HTMLInputElement) event.preventDefault();
 }
 
-export function publicationValidation({ title, tags, categoryId, copyright, source }, required = true) {
+export function publicationValidation({ title, tags, copyright, source }, required = true) {
   if (tags.length > 10) return copy.标签过多;
   if (!required) return '';
   if ([...title].length > 80) return copy.标题过长;
   if (!tags.length) return copy.请填标签;
-  if (!/^[1-9]\d{0,8}$/.test(String(categoryId))) return copy.请选择投稿分区;
   if (![1, 2].includes(copyright)) return copy.选择投稿类型;
   if (copyright === 2 && !source.trim()) return copy.请填转载来源;
   if (copyright === 2 && source.trim().length > 200) return copy.转载来源过长;
