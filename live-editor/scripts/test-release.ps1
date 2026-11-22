@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$Package,
     [string]$OutputRoot = '',
-    [string]$ProjectRoot = ''
+    [string]$ProjectRoot = '',
+    [switch]$RequireBilibiliUpload
 )
 $ErrorActionPreference = 'Stop'
 $Package = (Resolve-Path -LiteralPath $Package).Path
@@ -86,6 +87,13 @@ foreach ($item in Get-ChildItem -LiteralPath $root -Recurse -Force) {
 }
 'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(":memory:"); console.log(db.prepare("select 1 as ok").get()); db.close();' | & (Join-Path $componentRoot 'runtime\node\node.exe') --input-type=module -
 if ($LASTEXITCODE -ne 0) { throw 'Bundled Node/SQLite check failed.' }
+if ($RequireBilibiliUpload) {
+    $uploadSdk = [IO.Path]::GetFullPath((Join-Path $componentRoot 'live-editor/server/bilibili-upload-sdk.cjs'))
+    $uploadNotices = [IO.Path]::GetFullPath((Join-Path $componentRoot 'licenses/bilibili-upload-sdk-NOTICES.txt'))
+    if (!$listed.Contains($uploadSdk) -or !$listed.Contains($uploadNotices)) { throw 'Missing Bilibili upload module or license notices.' }
+    'const { Client } = require(process.argv[2]); new Client();' | & (Join-Path $componentRoot 'runtime\node\node.exe') --input-type=commonjs - $uploadSdk
+    if ($LASTEXITCODE -ne 0) { throw 'Bundled Bilibili upload module load failed.' }
+}
 & (Join-Path $componentRoot 'runtime\ffmpeg\ffmpeg.exe') -v error -f lavfi -i 'color=size=64x64:rate=60:duration=0.1' -c:v libx264 -f null -
 if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg encode check failed.' }
 $stylePreviewCheck = 'not-applicable-to-legacy-baseline'

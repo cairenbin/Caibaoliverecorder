@@ -23,19 +23,23 @@ const request=async(action)=>{
 };
 async function verifyAutoPostMenu(page){
  const base=await page.evaluate(async()=>await (await fetch('/api/state')).json());
- assert.equal(base.autoPost?.simulation,true,'The packaged backend must be in simulated submission mode');
+ assert.equal(base.autoPost?.simulation,false,'The packaged backend must use real submission');
  assert.equal(base.autoPost.cookieConfigured,false,'A fresh package must not contain a Bilibili Cookie');
+ assert.equal(base.bilibiliPublisher?.configured,false,'A fresh package must not have an authenticated posting account');
  let cookieConfigured=false;
+ const account={uid:'1003',name:'投稿测试账号'};
  const anchors=[
   {key:'bilibili:1001',platform:'bilibili',roomId:'1001',name:'投稿测试主播',enabled:true},
   {key:'douyin:1002',platform:'douyin',roomId:'1002',name:'抖音测试主播',enabled:true}
  ];
- const snapshot=()=>({...base,anchors,recorder:{...base.recorder,biliOnline:true,douyinOnline:true},autoPost:{...base.autoPost,cookieConfigured}});
+ const snapshot=()=>({...base,anchors,recorder:{...base.recorder,biliOnline:true,douyinOnline:true},
+  autoPost:{...base.autoPost,cookieConfigured},bilibiliPublisher:{...base.bilibiliPublisher,configured:cookieConfigured,cookieConfigured,accountUid:cookieConfigured?account.uid:''}});
  await page.route('**/api/state',route=>route.fulfill({json:snapshot()}));
  await page.route('**/api/events',route=>route.fulfill({contentType:'text/event-stream',body:`data: ${JSON.stringify(snapshot())}\n\n`}));
  await page.route('**/api/anchors/*/auto-post',route=>route.fulfill({json:{
   enabled:false,titleTemplate:'A的直播回放｜{录制日期}',description:'示例简介',
-  homepage:'https://space.bilibili.com/123',tags:['直播回放'],categoryId:171,mode:'danmaku'
+  homepage:'https://space.bilibili.com/123',tags:['直播回放'],categoryId:171,mode:'danmaku',
+  account,copyright:2,source:'https://space.bilibili.com/123'
  }}));
  const settings=page.getByRole('menuitem',{name:'自动投稿设置',exact:true});
  const remove=page.getByRole('menuitem',{name:'移除监控',exact:true});
@@ -50,6 +54,7 @@ async function verifyAutoPostMenu(page){
  }
  await settings.click();
  const form=page.locator('.auto-post-settings');
+ await form.getByText(/投稿测试账号.*1003/).waitFor({state:'visible',timeout:5000});
  const toggle=form.getByLabel('为这位主播开启自动投稿');
  await toggle.waitFor({state:'visible',timeout:5000});
  assert.equal(await toggle.isChecked(),false);

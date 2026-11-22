@@ -36,6 +36,7 @@ import CacheWarning from './components/CacheWarning.vue';
 import CookieWarning from './components/CookieWarning.vue';
 import MonitoredAnchors from './components/MonitoredAnchors.vue';
 import AutoPostSettings from './components/AutoPostSettings.vue';
+import QuickPublish from './components/QuickPublish.vue';
 import PowerSettings from './components/PowerSettings.vue';
 import DanmakuStyleSettings from './components/DanmakuStyleSettings.vue';
 import { applyUpdate } from './desktop.js';
@@ -54,6 +55,7 @@ import { toRecordingInput } from './recording-time.js';
 import { overlayWindow as makeOverlayWindow, containsOverlay } from './message-window.js';
 import { isDesktop, isMacDesktop, openAuthorPage, openStudioPage, pickExportFolder } from './desktop.js';
 import { api } from './api.js';
+import { publicationStatus } from './bilibili-publication.js';
 import { roomAvailable } from './room-status.js';
 import { stateSync } from './state-sync.js';
 import { createBackdropClickGuard } from './backdrop-click.js';
@@ -156,6 +158,7 @@ const lotteryTarget=ref(null),lotteryEditing=ref(false),lotteryLoading=ref(false
 let lotteryDetailRequest=0;
 const senderWarning=computed(()=>senderFilter.value?.mode==='approx'?ui.workbench.打码昵称匹配提示:senderFilter.value?.mode==='name'?ui.workbench.同名用户提示:'');
 const jobMenu=ref(null),jobDeleteTarget=ref(null),jobDeletePreview=shallowRef(null),jobPreviewLoading=ref(false),jobDeleteError=ref('');
+const quickPublishTarget=ref(null);
 const jobDeleteRecordOnly=ref(false),abandonSave=ref(false);
 const retrySaveTarget=ref(null),retrySaveDirectory=ref(''),retrySaveError=ref(''),retrySavingIds=ref([]),jobRetryErrors=ref({});
 const cacheWarningGBDraft=ref(null),cacheWarningBusy=ref(false),cacheWarningError=ref(''),cacheWarningDismissed=ref('');
@@ -201,7 +204,7 @@ const deleteBlock=computed(()=>{
   if(s.archive_status==='running'||state.value.jobs.some(j=>j.session===s.id&&['queued','running','finalizing','saving','cancelling'].includes(j.status)))return ui.workbench.素材使用中禁止删除;
   return '';
 });
-const modalTitle=computed(()=>({settings:ui.workbench.设置,'auto-post':ui.autoPost.设置,'edit-message':ui.workbench.编辑文本,lottery:lotteryEditing.value?ui.workbench.编辑奖品备注:ui.workbench.天选时刻中奖名单,'danmaku-style':ui.workbench.调整弹幕样式,'recording-style':ui.workbench.调整录制样式,'cookie-management':ui.common.Cookie管理,'xiaohongshu-cookie-notice':ui.credentials.小红书采集提示标题,export:exportScope.value==='full'?ui.workbench.导出完整素材:ui.workbench.导出选段,'choose-room':ui.workbench.选择主播,'remove-room':ui.common.移除监控主播,'delete-session':ui.workbench.删除已录制素材,'delete-job':abandonSave.value?ui.workbench.放弃这次导出:ui.workbench.删除导出任务,'retry-save':ui.workbench.更换保存位置})[modal.value]||'');
+const modalTitle=computed(()=>({settings:ui.workbench.设置,'auto-post':ui.autoPost.设置,'quick-publish':ui.autoPost.快速投稿,'edit-message':ui.workbench.编辑文本,lottery:lotteryEditing.value?ui.workbench.编辑奖品备注:ui.workbench.天选时刻中奖名单,'danmaku-style':ui.workbench.调整弹幕样式,'recording-style':ui.workbench.调整录制样式,'cookie-management':ui.common.Cookie管理,'xiaohongshu-cookie-notice':ui.credentials.小红书采集提示标题,export:exportScope.value==='full'?ui.workbench.导出完整素材:ui.workbench.导出选段,'choose-room':ui.workbench.选择主播,'remove-room':ui.common.移除监控主播,'delete-session':ui.workbench.删除已录制素材,'delete-job':abandonSave.value?ui.workbench.放弃这次导出:ui.workbench.删除导出任务,'retry-save':ui.workbench.更换保存位置})[modal.value]||'');
 const activeSession=computed(()=>materialSessions.value.find(s=>s.id===selected.value)||detail.value);
 const preparationEnabled=computed(()=>state.value.preparation?.enabled!==false);
 const livePreparationEnabled=computed(()=>state.value.preparation?.liveEnabled===true);
@@ -254,16 +257,18 @@ const visibleJobs=computed(()=>{
 const myJobs=computed(()=>visibleJobs.value.filter(job=>job.session===selected.value).sort((a,b)=>String(b.created||'').localeCompare(String(a.created||''))));
 const autoPostJobs=computed(()=>selected.value?(state.value.autoPost?.jobs||[]).filter(job=>job.session===selected.value):[]);
 const retryAutoPostIds=ref([]);
-function autoPostStatus(job){
-  const copy=ui.autoPost;
-  return ({
-    queued:copy.等待导出,
-    exporting:copy.正在导出,
-    simulated:copy.已模拟投稿,
-    failed:copy.待重试,
-    blocked:copy.已暂停,
-    cancelled:copy.已取消,
-  })[job.status]||copy.自动投稿;
+const quickPublications=computed(()=>new Map((state.value.quickPublish||[]).map(posting=>[posting.exportJobId,posting])));
+
+function canQuickPublish(job){
+  return state.value.autoPost?.cookieConfigured===true&&job?.status==='done'&&job.autoPostExport!==true&&!!(job.file||job.danmaku_file);
+}
+async function openQuickPublish(job){
+  if(!canQuickPublish(job)||modal.value||modalBusy.value)return;
+  closeContext();
+  quickPublishTarget.value=job.id;
+  modal.value='quick-publish';
+  await nextTick();
+  document.querySelector('.modal .close-modal')?.focus({preventScroll:true});
 }
 async function retryAutoPost(job){
   if(retryAutoPostIds.value.includes(job.session))return;
@@ -345,7 +350,7 @@ function materialPeople(session,kind){const names=[...new Set((session.monitorin
 function date(text){return new Date(text).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Asia/Shanghai'});}
 function categoryPath(root,category){const raw=String(root||''),value=raw.replace(/[\\/]+$/,'');return raw?value+(raw.startsWith('/')?'/':'\\')+category:category;}
 function formatBytes(bytes,base=1024){const size=Math.max(0,Number(bytes)||0);if(size<base)return size+ui.workbench.字节;const units=['KB','MB','GB','TB'],power=Math.min(4,Math.floor(Math.log(size)/Math.log(base)));return (size/base**power).toFixed(1)+' '+units[power-1];}
-function closeModal(){if(modalBusy.value)return;if(['danmaku-style','recording-style','cookie-management'].includes(modal.value)){const selector=modal.value==='cookie-management'?'.open-cookie-management':modal.value==='danmaku-style'?'.open-danmaku-style':'.open-recording-style';modal.value='settings';void nextTick(()=>document.querySelector(selector)?.focus());return;}const kind=modal.value,messageId=kind==='edit-message'?messageEditTarget.value?.message.id:kind==='lottery'?lotteryTarget.value?.record.id:null,jobId=kind==='delete-job'?jobDeleteTarget.value?.id:kind==='retry-save'?retrySaveTarget.value?.id:null;modal.value='';if(kind==='auto-post'){autoPostAnchor.value=null;restoreAnchorFocus();}if(kind==='remove-room')restoreAnchorFocus();if(kind==='choose-room'){roomChoice.value=null;roomChoicePlatform.value='';roomChoiceError.value='';void nextTick(()=>document.querySelector('.room-form input')?.focus());}if(kind==='delete-job'){jobPreviewRequest++;jobPreviewLoading.value=false;jobDeleteTarget.value=null;jobDeletePreview.value=null;}if(kind==='retry-save'){retrySaveTarget.value=null;retrySaveError.value='';}if(kind==='lottery'){lotteryDetailRequest++;lotteryLoading.value=false;lotteryTarget.value=null;lotteryError.value='';if(messageId)void nextTick(()=>document.getElementById('danmaku-'+messageId)?.querySelector('.lottery-open')?.focus());}if(kind==='edit-message'){messageEditTarget.value=null;if(messageId)void nextTick(()=>document.getElementById('danmaku-'+messageId)?.querySelector('.message-more')?.focus());}if(jobId)void nextTick(()=>focusJob(jobId));}
+function closeModal(){if(modalBusy.value)return;if(['danmaku-style','recording-style','cookie-management'].includes(modal.value)){const selector=modal.value==='cookie-management'?'.open-cookie-management':modal.value==='danmaku-style'?'.open-danmaku-style':'.open-recording-style';modal.value='settings';void nextTick(()=>document.querySelector(selector)?.focus());return;}const kind=modal.value,messageId=kind==='edit-message'?messageEditTarget.value?.message.id:kind==='lottery'?lotteryTarget.value?.record.id:null,jobId=kind==='delete-job'?jobDeleteTarget.value?.id:kind==='retry-save'?retrySaveTarget.value?.id:kind==='quick-publish'?quickPublishTarget.value:null;modal.value='';if(kind==='quick-publish')quickPublishTarget.value=null;if(kind==='auto-post'){autoPostAnchor.value=null;restoreAnchorFocus();}if(kind==='remove-room')restoreAnchorFocus();if(kind==='choose-room'){roomChoice.value=null;roomChoicePlatform.value='';roomChoiceError.value='';void nextTick(()=>document.querySelector('.room-form input')?.focus());}if(kind==='delete-job'){jobPreviewRequest++;jobPreviewLoading.value=false;jobDeleteTarget.value=null;jobDeletePreview.value=null;}if(kind==='retry-save'){retrySaveTarget.value=null;retrySaveError.value='';}if(kind==='lottery'){lotteryDetailRequest++;lotteryLoading.value=false;lotteryTarget.value=null;lotteryError.value='';if(messageId)void nextTick(()=>document.getElementById('danmaku-'+messageId)?.querySelector('.lottery-open')?.focus());}if(kind==='edit-message'){messageEditTarget.value=null;if(messageId)void nextTick(()=>document.getElementById('danmaku-'+messageId)?.querySelector('.message-more')?.focus());}if(jobId)void nextTick(()=>focusJob(jobId));}
 function dismissModalFromBackdrop(event){if(modalBackdropClick.click(event))closeModal();}
 function preparationFor(id){return state.value.preparation?.items?.find(item=>item.session===id);}
 function preparationStatus(entry){return ({queued:ui.workbench.等待预处理,preparing:ui.workbench.正在后台预处理,waiting:ui.workbench.暂缓预处理,paused:ui.workbench.预处理已暂停,ready:ui.workbench.预处理已完成,exported:ui.workbench.完整弹幕版已导出,error:ui.workbench.预处理未完成})[entry?.status]||ui.workbench.尚未预处理;}
@@ -966,19 +971,25 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
               <p v-if="job.automaticRetries>0&&job.status==='running'" class="job-save-hint">{{ ui.workbench.已尝试自动恢复 }} {{ job.automaticRetries }} {{ ui.workbench.次 }}</p>
               <div v-if="job.hasRetainedFiles&&['failed','interrupted','save_failed'].includes(job.status)" class="job-save-actions" @keydown.stop><button class="text-button" @click="openFolder({recoveryJobId:job.id})"><FolderOpen :size="14"/>{{ ui.workbench.查看暂存文件 }}</button></div>
               <div v-if="job.status==='done'" class="download-links" @keydown.stop><button class="text-button" @click="openFolder({jobId:job.id})"><FolderOpen :size="14"/>{{ ui.workbench.打开文件夹 }}</button></div>
+              <p v-if="quickPublications.has(job.id)" class="job-save-hint" :data-quick-publish-status="quickPublications.get(job.id).status" role="status">
+                {{ ui.autoPost.快速投稿 }} · {{ publicationStatus(quickPublications.get(job.id).status) }}
+              </p>
             </div>
           <button v-if="jobHistoryCursor" type="button" class="button subtle small" :disabled="loadingJobHistory" @click="loadJobHistory">{{ ui.workbench.加载更早导出记录 }}</button></section></div>
         <section v-if="autoPostJobs.length" class="auto-post-jobs" :aria-label="ui.autoPost.自动投稿">
-          <h2><Download :size="16" aria-hidden="true"/>{{ state.autoPost.simulation?ui.autoPost.模拟标题:ui.autoPost.自动投稿 }}</h2>
+          <h2><Download :size="16" aria-hidden="true"/>{{ ui.autoPost.自动投稿 }}</h2>
           <div v-for="posting in autoPostJobs" :key="posting.id" class="job-row" :data-auto-post-status="posting.status">
             <div>
               <strong>{{ posting.title }}</strong>
-              <small role="status">{{ autoPostStatus(posting) }}</small>
+              <small role="status">{{ publicationStatus(posting.status) }}</small>
             </div>
             <p v-if="posting.mode==='dual'" class="job-save-hint">
               {{ posting.parts?.length ? posting.parts.map((part,index)=>ui.autoPost.分P标题(index+1,part.title)).join(' · ') : ui.autoPost.分P预览 }}
             </p>
+            <progress v-if="posting.status==='uploading'&&Number.isFinite(posting.progress)" :value="posting.progress" max="1" :aria-label="ui.autoPost.上传中"/>
             <p v-if="posting.error" class="job-error">{{ posting.error }}</p>
+            <p v-if="posting.bvid || posting.aid" class="job-save-hint">{{ ui.autoPost.稿件编号(posting.bvid || posting.aid) }}</p>
+            <p v-if="posting.status==='uncertain'" class="job-save-hint">{{ ui.autoPost.请到创作中心确认 }}</p>
             <button v-if="posting.status==='failed'" type="button" class="text-button" :disabled="retryAutoPostIds.includes(posting.session)" @click="retryAutoPost(posting)">
               <LoaderCircle v-if="retryAutoPostIds.includes(posting.session)" :size="14" class="spin" aria-hidden="true"/>
               <RotateCcw v-else :size="14" aria-hidden="true"/>{{ ui.autoPost.重试 }}
@@ -1109,7 +1120,9 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
     </div>
     <div v-if="messageMenu" class="session-context message-context" role="menu" :aria-label="ui.workbench.记录操作" :style="{left:messageMenu.x+'px',top:messageMenu.y+'px'}" @pointerdown.stop @keydown.up.prevent="messageMenuKey" @keydown.down.prevent="messageMenuKey"><template v-if="messageMenu.message.type==='lottery'"><button role="menuitem" @click="openLottery(messageMenu.message)"><Trophy :size="16"/>{{ ui.workbench.查看中奖名单 }}</button><button role="menuitem" @click="openLottery(messageMenu.message,true)"><Pencil :size="16"/>{{ ui.workbench.编辑奖品备注 }}</button></template><template v-else><template v-if="messageMenu.message.type==='d'"><button role="menuitem" :disabled="!senderFilterFor(messageMenu.message)" :title="senderFilterFor(messageMenu.message)?'':ui.workbench.这条弹幕没有可区分的发送者信息" @click="filterSender(messageMenu.message)"><Search :size="16"/>{{ ui.workbench.只看此人弹幕 }}</button><button role="menuitem" :disabled="saving" @click="openMessageEditor(messageMenu.message)"><Pencil :size="16"/>{{ ui.workbench.编辑文本 }}</button><button role="menuitem" :disabled="saving" @click="toggleHighlight(messageMenu.message)"><span aria-hidden="true">✦</span>{{ highlighted.has(messageMenu.message.id)?ui.workbench.取消突出显示:ui.workbench.突出显示此条弹幕 }}</button></template><button role="menuitem" :disabled="saving" @click="toggleMessage(messageMenu.message);closeContext()"><Trash2 :size="16"/>{{ excluded.has(messageMenu.message.id)?ui.workbench.恢复此条弹幕:ui.workbench.从剪辑中排除此条 }}</button></template></div>
     <div v-if="sessionMenu" class="session-context" role="menu" :aria-label="ui.workbench.素材操作" :style="{left:sessionMenu.x+'px',top:sessionMenu.y+'px'}" @pointerdown.stop><button role="menuitem" :disabled="!!fullExportBlock(sessionMenu.session)" :title="fullExportBlock(sessionMenu.session)" @click="openFullExport(sessionMenu.session)"><Download :size="16"/>{{ ui.workbench.导出完整素材 }}</button><p v-if="fullExportBlock(sessionMenu.session)" class="context-hint">{{ fullExportBlock(sessionMenu.session) }}</p><button role="menuitem" :disabled="!!preparationActionBlock(sessionMenu.session)" :title="preparationActionBlock(sessionMenu.session)" @click="actPreparation(sessionMenu.session)"><Pause v-if="preparationAction(preparationFor(sessionMenu.session.id))==='pause'" :size="16"/><Check v-else-if="preparationFor(sessionMenu.session.id)?.status==='ready'" :size="16"/><Play v-else :size="16"/>{{ preparationActionLabel(preparationFor(sessionMenu.session.id),true) }}</button><p v-if="!preparationEnabled&&preparationAction(preparationFor(sessionMenu.session.id))!=='pause'" class="context-hint">{{ ui.workbench.请在设置中开启后台预处理 }}</p><button role="menuitem" class="context-danger" @click="requestDelete(sessionMenu.session)"><Trash2 :size="16"/>{{ ui.workbench.删除素材 }}</button></div>
-    <div v-if="jobMenu" class="session-context job-context" role="menu" :aria-label="ui.workbench.导出任务操作" tabindex="-1" :style="{left:jobMenu.x+'px',top:jobMenu.y+'px'}" @pointerdown.stop>
+    <div v-if="jobMenu" class="session-context job-context" role="menu" :aria-label="ui.workbench.导出任务操作" tabindex="-1" :style="{left:jobMenu.x+'px',top:jobMenu.y+'px'}" @pointerdown.stop @keydown.up.prevent="messageMenuKey" @keydown.down.prevent="messageMenuKey">
+      <button v-if="canQuickPublish(jobMenuTarget)" type="button" role="menuitem" @click="openQuickPublish(jobMenuTarget)"><PlatformBadge platform="bilibili" compact decorative/>{{ ui.autoPost.快速投稿 }}</button>
+      <button v-if="jobMenuTarget?.status==='done'" type="button" role="menuitem" @click="openFolder({jobId:jobMenuTarget.id});closeContext()"><FolderOpen :size="16" aria-hidden="true"/>{{ ui.workbench.打开文件夹 }}</button>
       <button v-if="['queued','running','finalizing','cancelling','saving'].includes(jobMenuTarget?.status)" role="menuitem" :disabled="!!jobCancellationBlock(jobMenuTarget)" :title="jobCancellationBlock(jobMenuTarget)" @click="cancelJob(jobMenuTarget)"><X :size="16"/>{{ ui.workbench.取消导出 }}</button>
       <button role="menuitem" class="context-danger" :disabled="!!jobRemovalBlock(jobMenuTarget)" @click="requestJobDelete(jobMenuTarget)"><Trash2 :size="16"/>{{ ui.workbench.删除导出任务删除导出任务 }}</button>
       <p v-if="jobRemovalBlock(jobMenuTarget)" class="context-hint">{{ jobRemovalBlock(jobMenuTarget) }}</p>
@@ -1144,7 +1157,11 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
       <template v-else-if="modal==='auto-post'&&autoPostAnchor">
         <h2><PlatformBadge platform="bilibili" compact decorative/>{{ ui.autoPost.设置 }}</h2>
         <p class="export-target">{{ autoPostAnchor.name }}</p>
-        <AutoPostSettings :anchor="autoPostAnchor" :simulation="state.autoPost?.simulation===true" @busy="modalBusy=$event" @saved="saveAutoPostSettings" @close="closeModal"/>
+        <AutoPostSettings :anchor="autoPostAnchor" @busy="modalBusy=$event" @saved="saveAutoPostSettings" @close="closeModal"/>
+      </template>
+      <template v-else-if="modal==='quick-publish'&&quickPublishTarget">
+        <h2><PlatformBadge platform="bilibili" compact decorative/>{{ ui.autoPost.快速投稿 }}</h2>
+        <QuickPublish :job-id="quickPublishTarget" @busy="modalBusy=$event" @close="closeModal" @changed="refresh"/>
       </template>
       <template v-else-if="modal==='lottery' && lotteryTarget"><h2><Trophy :size="23"/>{{ lotteryEditing?ui.workbench.编辑奖品备注:ui.workbench.天选时刻中奖名单 }}</h2><LotteryPanel :record="lotteryTarget.record" :editing="lotteryEditing" :busy="modalBusy" :loading="lotteryLoading" :error="lotteryError" @save="saveLotteryRemark" @edit="lotteryEditing=true;lotteryError=''" @refresh="refreshLotteryDetail" @close="closeModal"/></template>
       <template v-else-if="modal==='edit-message' && messageEditTarget"><h2>{{ ui.workbench.编辑文本 }}</h2><MessageTextEditor :message="messageEditTarget.message" :busy="modalBusy" @save="saveMessageText" @close="closeModal"/></template>

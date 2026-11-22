@@ -40,6 +40,8 @@ import { listenLocal } from './local-endpoint.js';
 import { DanmakuStylePreview } from './danmaku-style-preview.js';
 import { LinkmicIndex } from './linkmic.js';
 import {AutoPost} from './auto-post.js';
+import {BilibiliPublisher} from './bilibili-publisher.js';
+import {QuickPublish} from './quick-publish.js';
 import {PlatformCredentials,COOKIE_PLATFORMS} from './platform-credentials.js';
 import {PlatformCookieValidation} from './platform-cookie-validation.js';
 
@@ -68,6 +70,8 @@ async function createManagedApp(options,runtime) {
   await runtime.startup('打开素材数据库');
   const store=await openRecoveredStore(root,diagnostics);
   const credentials=await new PlatformCredentials(root,{diagnostics,...options.credentialOptions,store}).initialize();
+  const publisher=new BilibiliPublisher(store,credentials,options.publisherOptions);
+  await publisher.initialize();
   if(options.defaultExportRoot||process.env.EDITOR_EXPORT_ROOT)store.defaultExportRoot=path.resolve(options.defaultExportRoot||process.env.EDITOR_EXPORT_ROOT);
   store.projectRoot=path.resolve(options.projectRoot??(options.data?path.dirname(root):projectRoot));
   const ingestor=new Ingestor(store),media=new Media(store,{ffmpeg,ffprobe}),storage=new CompactStorage(store),jobDeletion=new JobDeletion(store,media);
@@ -109,7 +113,7 @@ async function createManagedApp(options,runtime) {
   const previewTimestamp=()=>store.setting('preview-timestamp')===true;
   const settingsSnapshot=()=>workbenchSettings(store,media,closeAction,previewTimestamp);
   function validateCloseAction(value){if(!['ask','exit','background'].includes(value))throw new Error('请选择有效的关闭窗口方式。');}
-  const activity=()=>appActivity({store,media,recorder,preparation,storage,ingestor,deletingSessions});
+  const activity=()=>appActivity({store,media,recorder,preparation,storage,ingestor,deletingSessions,publishing:publisher.hasWork()});
   const packageInfo=JSON.parse(await fs.readFile(path.join(appRoot,'package.json'),'utf8'));
   const current={version:packageInfo.version,revision:packageInfo.buildRevision??1};
   if(packageInfo.buildRevision!==undefined&&!current.version.includes('-beta.'))current.buildId=buildIdentity(current);
@@ -123,12 +127,16 @@ async function createManagedApp(options,runtime) {
   autoUpdate=new AutoUpdate({updates,runtime,appRoot,projectRoot,activity,quit:()=>desktopExit.request(false)});
   const autoPost=new AutoPost(store,credentials,media,()=>recorder.anchors,()=>closing||store.recovery.recovering||
     autoUpdate.applying||(!options.noRecorder&&recorder.connectionPending)||hasRecording(store,recorder)||
-    storage.busy||hasIndexing(store)||media.hasForegroundWork());
+    storage.busy||hasIndexing(store)||media.hasForegroundWork(),publisher);
+  const quickPublish=new QuickPublish(store,publisher);
+  jobDeletion.isPublishing=id=>autoPost.isUploadingExport(id)||quickPublish.isBusy(id);
   recorder.bilibili.onRecordingOpened=session=>autoPost.capture(session);
   const snapshot=()=>({
     ...workbenchSnapshot({store,recorder,diagnostics,updates,preparation,deletingSessions,root,
       settingsSnapshot,credentialWarnings:credentials.warnings()}),
     autoPost:autoPost.snapshot(),
+    bilibiliPublisher:publisher.snapshot(),
+    quickPublish:quickPublish.snapshot(),
   });
   const server=http.createServer(async(req,res)=>{
     try {
@@ -184,12 +192,17 @@ async function createManagedApp(options,runtime) {
       }
       if(p==='/api/follow-users'&&req.method==='POST')return json(res,await recorder.douyin.following.add((await body(req)).url));
       if(p==='/api/anchors'&&req.method==='POST')return json(res,await recorder.addAnchor(await body(req)));
+      const quickJob=/^\/api\/jobs\/([a-z0-9-]{1,64})\/quick-publish$/i.exec(p);
+      if(quickJob) {
+        if(req.method==='GET')return json(res,await quickPublish.details(quickJob[1]));
+        if(req.method==='POST')return json(res,await quickPublish.submit(quickJob[1],await body(req,16384)),202);
+      }
       const autoPostAnchor=/^\/api\/anchors\/bilibili(?::|%3a)(\d{1,20})\/auto-post$/i.exec(p);
       const autoPostRetry=/^\/api\/auto-post\/([a-z0-9-]{1,64})\/retry$/i.exec(p);
       if(autoPostRetry&&req.method==='POST')return json(res,autoPost.retry(autoPostRetry[1]));
       if(autoPostAnchor&&['GET','POST'].includes(req.method)) {
         const input=req.method==='POST'?await body(req,16384):undefined;
-        return json(res,autoPost.settings('bilibili:'+autoPostAnchor[1],input));
+        return json(res,await autoPost.settings('bilibili:'+autoPostAnchor[1],input));
       }
       const anchorAction=p.match(/^\/api\/anchors\/([a-z-]+:\d{1,20}|xiaohongshu-user:[a-f0-9]{24})\/(start|stop|remove)$/);
       if(anchorAction&&req.method==='POST'&&recorder.platformForAnchor(anchorAction[1])) {
@@ -275,9 +288,13 @@ async function createManagedApp(options,runtime) {
   catch(error){liveHealth.close();media.close();await recorder.close();await media.waitForSaves();await new Promise(resolve=>server.close(resolve));await credentials.close();store.close();throw error;}
 
   let nextTemporarySweep=0;
+  const authorizePublication=(owner,uid,taskId)=>!closing&&(owner.kind==='auto'
+    ?autoPost.authorizes(owner.id,uid,taskId):quickPublish.authorizes(owner.id,uid,taskId));
   const maintain=()=>{
     if(closing||store.recovery.recovering||autoUpdate.applying)return;
     void autoPost.tick()?.catch(error=>diagnostics.record('自动投稿',error,{level:'警告'}));
+    void quickPublish.tick()?.catch(error=>diagnostics.record('快速发布',error,{level:'警告'}));
+    void publisher.tick(authorizePublication)?.catch(error=>diagnostics.record('B站投稿',error,{level:'警告'}));
     void deletionMaintenance.tick().catch(error=>{deletionMaintenance.lastError=error.message;diagnostics.record('自动清理',error,{level:'警告'});});
     if(options.compact!==false)void storage.tick().catch(error=>{storage.lastError=error.message;diagnostics.record('素材整理',error,{level:'警告'});});
     if(Date.now()>=nextTemporarySweep){nextTemporarySweep=Date.now()+60000;void media.cleanupStaleTemporary().catch(error=>{media.temporaryCleanupError=error.message;diagnostics.record('缓存清理',error,{level:'警告'});});}
@@ -324,12 +341,12 @@ async function createManagedApp(options,runtime) {
   const diagnosticTimer=setInterval(diagnosticPoll,30000);diagnosticPoll();
   if(!options.noRecorder){void recorder.start().catch(e=>{recorder.bilibili.error=e.message;});}
   const close=closeAppWith({
-    beginClosing:()=>{closing=true;cookieValidation.close();}, autoPost, timers:[timer,maintenanceTimer,runtimeTimer,diagnosticTimer],
+    beginClosing:()=>{closing=true;cookieValidation.close();}, autoPost, quickPublish, publisher, timers:[timer,maintenanceTimer,runtimeTimer,diagnosticTimer],
     liveHealth,lotteries,updates,ingestor,media,recorder,linkmic,deletionMaintenance,deletingSessions,
     preparation,waveform,density,clients,server,storage,getStartupRecovery:()=>startupRecovery,
     credentials,diagnostics,store,runtime,
   });
-  app={credentials,cookieValidation,diagnostics,updates,store,ingestor,media,storage,waveform,density,preparation,deletionMaintenance,deletingSessions,recorder,lotteries,runtime,desktopExit,activity,server,port,root,snapshot,close};
+  app={credentials,cookieValidation,publisher,quickPublish,diagnostics,updates,store,ingestor,media,storage,waveform,density,preparation,deletionMaintenance,deletingSessions,recorder,lotteries,runtime,desktopExit,activity,server,port,root,snapshot,close};
   startupRecovery=recoverAppTasks({
     diagnostics,media,store,isClosing:()=>closing,ingestor,preparation,lotteries,options,maintain,
   });

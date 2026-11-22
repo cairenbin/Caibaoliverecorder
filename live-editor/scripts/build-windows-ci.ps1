@@ -58,7 +58,7 @@ $sourceUrl = "https://github.com/kk12091209/Caibaoliverecorder/releases/download
 & (Join-Path $PSScriptRoot 'build-release.ps1') -ProjectRoot $root -AppRoot (Join-Path $root 'live-editor') -DesktopRoot (Join-Path $root 'live-editor/desktop/package') -RuntimeRoot $runtime -ToolsRoot $tools -FFmpegRoot $media -NuGetRoot $env:NUGET_PACKAGES -OutputRoot $output -Version $version -ForPublic -SourceUrl $sourceUrl -Include7z
 $name = "BiliLiveEditor-$version-win-x64"
 foreach ($extension in @('zip','7z')) {
-    & (Join-Path $PSScriptRoot 'test-release.ps1') -ProjectRoot $root -Package (Join-Path $output "$name.$extension") -OutputRoot (Join-Path $qa $extension)
+    & (Join-Path $PSScriptRoot 'test-release.ps1') -ProjectRoot $root -Package (Join-Path $output "$name.$extension") -OutputRoot (Join-Path $qa $extension) -RequireBilibiliUpload
 }
 $portable = (Get-Content (Join-Path $qa 'zip/verification.json') -Raw | ConvertFrom-Json).extractedRoot
 foreach ($launch in @('first','reopened')) {

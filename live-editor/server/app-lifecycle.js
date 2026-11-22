@@ -1,13 +1,13 @@
 // The app owns its tasks until readers, writers and external processes settle.
 export function closeAppWith({
-  beginClosing, timers, liveHealth, lotteries, updates, ingestor, media, recorder, linkmic, autoPost,
+  beginClosing, timers, liveHealth, lotteries, updates, ingestor, media, recorder, linkmic, autoPost, quickPublish, publisher,
   deletionMaintenance, deletingSessions, preparation, waveform, density, clients, server,
   storage, getStartupRecovery, credentials, diagnostics, store, runtime,
 }) {
   let closePromise;
   return function close() {
     return closePromise??=(async()=>{
-      beginClosing();liveHealth.close();await lotteries.close();await updates.close();for(const timer of timers)clearInterval(timer);ingestor.stop();media.close();const recorderClosed=recorder.close();await linkmic.close();
+      beginClosing();const publisherClosed=publisher?.close();liveHealth.close();await lotteries.close();await updates.close();for(const timer of timers)clearInterval(timer);ingestor.stop();media.close();const recorderClosed=recorder.close();await linkmic.close();
       const deletionsClosed=Promise.allSettled([deletionMaintenance.close(),deletingSessions.close()]);
       const preparationClosed=preparation.close();
       const waveformClosed=waveform.close();density.close();
@@ -18,7 +18,7 @@ export function closeAppWith({
       await preparationClosed;
       await deletionsClosed;
       await getStartupRecovery();
-      await autoPost?.close();
+      await Promise.all([autoPost?.close(),quickPublish?.close(),publisherClosed]);
       await media.waitForSaves();
       await Promise.allSettled([...media.probes,...media.enqueues,...media.previews.values()].map(operation=>operation.done));
       await httpClosed;

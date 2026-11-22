@@ -103,6 +103,8 @@ Add-ComponentFile (Join-Path $ProjectRoot 'THIRD_PARTY_NOTICES.md') 'licenses/TH
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $AppRoot 'docs\licenses') -File -Filter '*.txt') { Add-ComponentFile $file.FullName ('licenses/douyin/' + $file.Name) }
 Add-ComponentFile (Join-Path $AppRoot 'package.json') 'live-editor/package.json'
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $AppRoot 'server') -File -Filter '*.js') { Add-ComponentFile $file.FullName ('live-editor/server/' + $file.Name) }
+node (Join-Path $PSScriptRoot 'build-bilibili-upload-sdk.mjs') (Join-Path $componentRoot 'live-editor/server/bilibili-upload-sdk.cjs') (Join-Path $componentRoot 'licenses/bilibili-upload-sdk-NOTICES.txt')
+if ($LASTEXITCODE -ne 0) { throw 'Building the bundled Bilibili upload module failed.' }
 Add-ComponentFile (Join-Path $AppRoot 'server\cookie-protection.ps1') 'live-editor/server/cookie-protection.ps1'
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $AppRoot 'shared') -File -Filter '*.js') { Add-ComponentFile $file.FullName ('live-editor/shared/' + $file.Name) }
 Add-ComponentFile (Join-Path $AppRoot 'dist\index.html') 'live-editor/dist/index.html'

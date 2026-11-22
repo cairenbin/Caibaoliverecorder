@@ -4,15 +4,12 @@ import { LoaderCircle } from 'lucide-vue-next';
 import { ui } from '../../shared/ui-copy.js';
 import { POST_DATE_TOKEN, renderAutoPostTitle } from '../../shared/auto-post-title.js';
 import { api } from '../api.js';
+import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationTags, publicationValidation } from '../bilibili-publication.js';
+import PublicationCopyright from './PublicationCopyright.vue';
 
-const props = defineProps({ anchor: { type: Object, required: true }, simulation: Boolean });
+const props = defineProps({ anchor: { type: Object, required: true } });
 const emit = defineEmits(['busy', 'saved', 'close']);
 const copy = ui.autoPost;
-const modes = [
-  { id: 'danmaku', label: copy.仅弹幕版 },
-  { id: 'clean', label: copy.仅纯净版 },
-  { id: 'dual', label: copy.双版本分P },
-];
 const today = new Date();
 const route = `anchors/${encodeURIComponent(props.anchor.key)}/auto-post`;
 const enabled = ref(false);
@@ -21,8 +18,11 @@ const description = ref('');
 const homepage = ref('');
 const tagsText = ref('');
 const categoryId = ref('');
+const copyright = ref(2);
+const source = ref('');
 const mode = ref('danmaku');
-const account = ref('');
+const account = ref(null);
+const accountError = ref('');
 const titleInput = ref(null);
 const enableInput = ref(null);
 const loading = ref(true);
@@ -31,10 +31,18 @@ const saving = ref(false);
 const error = ref('');
 const request = new AbortController();
 const preview = computed(() => renderAutoPostTitle(titleTemplate.value, today));
-const tags = computed(() => [...new Set(tagsText.value.split(/[,，\n]/).map(tag => tag.trim()).filter(Boolean))]);
-const validationError = computed(() => tags.value.length > 10 ? copy.标签过多
-  : enabled.value && [...preview.value].length > 80 ? copy.标题过长 : '');
-const valid = computed(() => !validationError.value && (!enabled.value || !!preview.value));
+const tags = computed(() => publicationTags(tagsText.value));
+const accountLabel = computed(() => publicationAccountLabel(account.value));
+const validationError = computed(() => {
+  const profile = homepage.value.trim();
+  const intro = [description.value.trim(), profile ? `${copy.主播主页}：${profile}` : ''].filter(Boolean).join('\n');
+  if (enabled.value && intro.length > 2000) return copy.简介与主页过长;
+  return publicationValidation({
+    title: preview.value, tags: tags.value, categoryId: categoryId.value, copyright: copyright.value, source: source.value,
+  }, enabled.value);
+});
+const canUseAccount = computed(() => !!account.value?.uid && !accountError.value);
+const valid = computed(() => !validationError.value && (!enabled.value || (!!preview.value && canUseAccount.value)));
 
 onMounted(async () => {
   try {
@@ -48,8 +56,11 @@ onMounted(async () => {
     homepage.value = settings.homepage || '';
     tagsText.value = (settings.tags ?? []).join('，');
     categoryId.value = settings.categoryId ?? '';
-    mode.value = modes.some(option => option.id === settings.mode) ? settings.mode : 'danmaku';
-    account.value = settings.account?.name || settings.account?.uid || '';
+    mode.value = publicationModes.some(option => option.id === settings.mode) ? settings.mode : 'danmaku';
+    copyright.value = Number(settings.copyright) === 1 ? 1 : 2;
+    source.value = settings.source || '';
+    account.value = settings.account || null;
+    accountError.value = settings.accountError || '';
     loaded.value = true;
   } catch (cause) {
     if (!request.signal.aborted) error.value = cause.message;
@@ -89,8 +100,11 @@ async function save() {
       homepage: homepage.value.trim(),
       tags: tags.value,
       categoryId: categoryId.value,
+      copyright: copyright.value,
+      source: copyright.value === 2 ? source.value.trim() : '',
       mode: mode.value,
-    }, { signal: AbortSignal.any([request.signal, AbortSignal.timeout(8000)]) });
+      accountUid: String(account.value?.uid || ''),
+    }, { signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]) });
     saved = true;
   } catch (cause) {
     if (!request.signal.aborted) error.value = cause.message;
@@ -103,18 +117,16 @@ async function save() {
 </script>
 
 <template>
-  <div v-if="simulation" class="auto-post-note" role="note">
-    <strong>{{ copy.模拟标题 }}</strong>
-    <span>{{ copy.模拟说明 }}</span>
-  </div>
   <p v-if="loading" role="status">{{ copy.读取中 }}</p>
   <p v-if="error && !loaded" class="inline-warning" role="alert">{{ error }}</p>
-  <form v-if="loaded" class="auto-post-settings" @submit.prevent="save">
+  <form v-if="loaded" class="auto-post-settings" @submit.prevent="save" @keydown.enter="preventImplicitPublication">
     <label class="checkbox auto-post-toggle">
-      <input ref="enableInput" v-model="enabled" type="checkbox" :disabled="saving"/>
+      <input ref="enableInput" v-model="enabled" type="checkbox" :disabled="saving || (!enabled && !canUseAccount)"/>
       {{ copy.启用 }}
     </label>
-    <p v-if="account" class="muted">{{ copy.投稿账号(account) }}</p>
+    <p v-if="accountLabel" class="export-target">{{ copy.投稿账号(accountLabel) }}</p>
+    <p v-if="!canUseAccount" class="inline-warning" role="alert">{{ accountError || copy.投稿账号不可用 }}</p>
+    <p v-if="enabled" class="muted">{{ copy.已开启说明 }}</p>
 
     <div class="auto-post-fields">
       <div class="field-label">
@@ -142,15 +154,16 @@ async function save() {
         {{ copy.标签 }}
         <input id="auto-post-tags" v-model="tagsText" maxlength="200" :disabled="saving" :placeholder="copy.标签分隔"/>
       </label>
-      <label v-if="!simulation" class="field-label" for="auto-post-category">
+      <label class="field-label" for="auto-post-category">
         {{ copy.投稿分区 }}
-        <input id="auto-post-category" v-model="categoryId" type="number" min="1" step="1" :disabled="saving"/>
+        <input id="auto-post-category" v-model="categoryId" type="number" min="1" max="999999999" step="1" :required="enabled" :disabled="saving"/>
       </label>
+      <PublicationCopyright v-model:copyright="copyright" v-model:source="source" field-prefix="auto-post" :required="enabled" :disabled="saving"/>
     </div>
 
     <fieldset class="auto-post-versions" :disabled="saving">
       <legend>{{ copy.投稿版本 }}</legend>
-      <label v-for="option in modes" :key="option.id" class="checkbox">
+      <label v-for="option in publicationModes" :key="option.id" class="checkbox">
         <input v-model="mode" type="radio" name="auto-post-mode" :value="option.id"/>
         {{ option.label }}
       </label>
@@ -168,8 +181,6 @@ async function save() {
 </template>
 
 <style scoped>
-.auto-post-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; margin: 10px 0 16px; color: var(--muted); font-size: 12px; }
-.auto-post-note strong { color: var(--accent-dark); }
 .auto-post-toggle { color: var(--text); }
 .auto-post-fields .field-label { margin-block: 12px; }
 .auto-post-title-editor { display: flex; gap: 8px; }

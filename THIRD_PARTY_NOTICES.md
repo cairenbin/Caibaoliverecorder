@@ -13,6 +13,7 @@
 | Inno Setup | 6.7.3 | [对应版本源码](https://github.com/jrsoftware/issrc/tree/is-6_7_3)；安装版额外包含 licenses/Inno-Setup-LICENSE.txt |
 | 安装器简体中文翻译 | 1ff90acc4ed4aee82b1cda43253243deee3daed4 | [翻译来源](https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/tree/1ff90acc4ed4aee82b1cda43253243deee3daed4)，MIT；源码 installer/translation-LICENSE.txt，安装版 licenses/installer-translation-LICENSE.txt |
 | Vue / Lucide | 锁定版本见 live-editor/package-lock.json | [Vue](https://github.com/vuejs/core)、[Lucide](https://github.com/lucide-icons/lucide)；包内 licenses/frontend |
+| B站投稿模块 `@renmu/bili-api` | 2.15.2，GPL v3 | [对应源码提交](https://github.com/renmu123/biliAPI/tree/01cce27f77fdd0600e80275f92b6908868f1762b)、[本项目构建脚本](live-editor/scripts/build-bilibili-upload-sdk.mjs)；模块及其依赖的来源、版本和许可文本见包内 `licenses/bilibili-upload-sdk-NOTICES.txt` |
 | 抖音 HTTP 签名互操作算法 | 2026-10-01 适配 | 从 [ihmily/streamget](https://github.com/ihmily/streamget/blob/main/streamget/platforms/douyin/ab_sign.py) 移植为本地 JavaScript，MIT；完整许可保存在 live-editor/docs/licenses/streamget-MIT.txt，运行包 licenses/douyin |
 | 抖音 WebSocket 签名互操作算法 | native.go SHA-256 `faa39870efd791f02ee3881abb7a4bea2292c34508a294106cb3fcec06542a28` | 从 [jwwsjlm/douyinLive](https://github.com/jwwsjlm/douyinLive/blob/main/internal/webcastsign/native.go) 移植，MIT；保留原作者许可 live-editor/docs/licenses/douyinLive-MIT.txt，运行包 licenses/douyin。未内嵌浏览器签名 SDK |
 | WebView2 SDK | 1.0.4191.47 | [微软 SDK 许可与说明](https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4191.47)；runtime/desktop 内 LICENSE / NOTICE |

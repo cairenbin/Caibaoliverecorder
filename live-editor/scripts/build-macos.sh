@@ -27,6 +27,8 @@ node live-editor/scripts/build-live-resource-helper.mjs "$RESOURCES/runtime/reso
 node live-editor/scripts/build-cookie-helper.mjs "$RESOURCES/runtime/credentials/cookie-protection"
 cp -R live-editor/server live-editor/shared live-editor/dist "$RESOURCES/live-editor/"
 cp live-editor/package.json "$RESOURCES/live-editor/"
+UPLOAD_SDK="$RESOURCES/live-editor/server/bilibili-upload-sdk.cjs"
+node live-editor/scripts/build-bilibili-upload-sdk.mjs "$UPLOAD_SDK" "$RESOURCES/licenses/bilibili-upload-sdk-NOTICES.txt"
 # Installed 0.1.6 Mac helpers require this field before replacing an app.
 python3 - "$RESOURCES/live-editor/package.json" <<'PY'
 import json,sys
@@ -36,6 +38,7 @@ if type(info['buildRevision']) is not int or not 1<=info['buildRevision']<=99999
 file.write_text(json.dumps(info,ensure_ascii=False,indent=2)+'\n')
 PY
 cp "$CAIBO_MAC_NODE_ROOT/bin/node" "$RESOURCES/runtime/node/"
+"$RESOURCES/runtime/node/node" -e 'const { Client } = require(require("node:path").resolve(process.argv[1])); new Client();' "$UPLOAD_SDK"
 cp .tools/runtime/ffmpeg/ffmpeg .tools/runtime/ffmpeg/ffprobe "$RESOURCES/runtime/ffmpeg/"
 python3 - "$PUBLISH" "$RESOURCES/runtime/recorder" <<'PY'
 import shutil,sys

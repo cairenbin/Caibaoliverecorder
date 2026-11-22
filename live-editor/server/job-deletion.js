@@ -163,6 +163,7 @@ export class JobDeletion {
   async delete(id, input = {}) {
     if (input.confirmed !== true) throw new Error('请先确认是否删除导出文件和任务记录。');
     if (this.deleting.has(id)) throw new Error('此导出任务正在删除，请稍候。');
+    if (input.recordOnly !== true && this.isPublishing?.(id)) throw new Error('成片正在上传，请等上传结束后再删除视频。');
     this.deleting.add(id); let deletedFiles = 0, freedBytes = 0;
     try {
       const canAbandon=()=>input.recordOnly===true&&input.abandonSave===true&&this.job(id)?.status==='save_failed'
