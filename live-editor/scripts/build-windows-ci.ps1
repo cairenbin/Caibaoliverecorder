@@ -62,7 +62,9 @@ foreach ($extension in @('zip','7z')) {
 }
 $portable = (Get-Content (Join-Path $qa 'zip/verification.json') -Raw | ConvertFrom-Json).extractedRoot
 foreach ($launch in @('first','reopened')) {
-    node live-editor/scripts/verify-windows-ui.mjs $portable (Join-Path $qa "ui/$launch")
+    $probeArgs = @('live-editor/scripts/verify-windows-ui.mjs', $portable, (Join-Path $qa "ui/$launch"))
+    if ($launch -eq 'first') { $probeArgs += '--auto-post' }
+    node @probeArgs
     if ($LASTEXITCODE -ne 0) { throw "Packaged Windows desktop UI failed: $launch" }
 }
 & (Join-Path $PSScriptRoot 'test-installer.ps1') -ProjectRoot $root -Stage (Join-Path $output $name) -ToolsRoot $tools -Version $version

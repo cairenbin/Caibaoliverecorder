@@ -268,7 +268,10 @@ export class Recorder {
         source=this.store.addSource(session.id,full,start,d.FileOpenTime||event.EventTimestamp,type==='FileClosed');
         // Only a new, observed live opening opts into future transient-chunk
         // release. Historical scans, imports and late openings never opt in.
-        if(type==='FileOpening'&&source.closed===0&&Number.isFinite(Date.parse(d.FileOpenTime))&&Date.parse(d.FileOpenTime)>=this.storageEligibilitySince)this.store.run("INSERT INTO source_storage(source,eligible) VALUES(?,1) ON CONFLICT(source) DO NOTHING",source.id);
+        if(type==='FileOpening'&&source.closed===0&&Number.isFinite(Date.parse(d.FileOpenTime))&&Date.parse(d.FileOpenTime)>=this.storageEligibilitySince) {
+          this.store.run("INSERT INTO source_storage(source,eligible) VALUES(?,1) ON CONFLICT(source) DO NOTHING",source.id);
+          try{this.onRecordingOpened?.(session);}catch(error){this.store.diagnostics?.record('自动投稿',error,{level:'警告'});}
+        }
         this.store.run("UPDATE sessions SET status='recording' WHERE id=?",session.id);
       }
       if(type==='FileClosed')this.store.run('UPDATE sources SET closed=MAX(closed,1) WHERE id=?',source.id);

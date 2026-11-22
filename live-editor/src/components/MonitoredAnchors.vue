@@ -1,11 +1,11 @@
 <script setup>
 import { ui } from '../../shared/ui-copy.js';
 
-import {X,LoaderCircle} from 'lucide-vue-next';
+import {MoreHorizontal,LoaderCircle} from 'lucide-vue-next';
 import {roomAvailable,roomStatus} from '../room-status.js';
 import PlatformBadge from './PlatformBadge.vue';
-defineProps({anchors:{type:Array,default:()=>[]},recorder:{type:Object,required:true},busy:{type:Array,default:()=>[]}});
-defineEmits(['action','remove']);
+defineProps({anchors:{type:Array,default:()=>[]},recorder:{type:Object,required:true},busy:{type:Array,default:()=>[]},menuKey:{type:String,default:''}});
+defineEmits(['action','menu']);
 const rawStatus=anchor=>anchor.legacy?roomStatus(anchor):anchor.state||'';
 const idleDouyinMonitor=anchor=>anchor.platform==='douyin'&&!anchor.legacy&&anchor.enabled&&!anchor.recording&&!anchor.webRid;
 function statusDetail(anchor){
@@ -29,8 +29,31 @@ function warning(anchor){
 const roomNumber=anchor=>anchor.ownWebRid||(anchor.platform==='douyin'?(anchor.legacy?anchor.webRid:''):anchor.roomId)||'—';
 </script>
 <template>
-  <article v-for="anchor in anchors" :key="anchor.key" class="monitored-anchor" :data-recording="anchor.recording" :aria-label="ui.anchors.监控主播+anchor.name">
-    <div class="anchor-heading"><PlatformBadge :platform="anchor.platform" compact/><strong :title="anchor.name">{{ anchor.name||ui.anchors.主播 }}</strong><button class="anchor-remove" :aria-label="ui.anchors.移除监控+anchor.name" :title="ui.common.移除监控主播" :disabled="busy.includes(anchor.key)||!roomAvailable(anchor,recorder)" @click="$emit('remove',anchor)"><X :size="14" aria-hidden="true"/></button></div>
+  <article
+    v-for="anchor in anchors"
+    :key="anchor.key"
+    class="monitored-anchor"
+    :data-recording="anchor.recording"
+    :aria-label="ui.anchors.监控主播+anchor.name"
+    @contextmenu.prevent.stop="$emit('menu',$event,anchor)"
+    @click.ctrl.exact.capture.prevent.stop="$emit('menu',$event,anchor)"
+    @keydown.shift.f10.prevent.stop="$emit('menu',$event,anchor)"
+    @keydown.context-menu.prevent.stop="$emit('menu',$event,anchor)"
+  >
+    <div class="anchor-heading">
+      <PlatformBadge :platform="anchor.platform" compact/>
+      <strong :title="anchor.name">{{ anchor.name||ui.anchors.主播 }}</strong>
+      <button
+        type="button"
+        class="anchor-menu-trigger"
+        :aria-label="ui.anchors.监控主播+anchor.name+' · '+ui.anchors.主播操作"
+        :title="ui.anchors.主播操作"
+        :aria-expanded="menuKey===anchor.key"
+        aria-haspopup="menu"
+        @pointerdown.stop
+        @click="$emit('menu',$event,anchor)"
+      ><MoreHorizontal :size="16" aria-hidden="true"/></button>
+    </div>
     <div class="anchor-room">{{ ui.anchors.本人直播间 }}{{ roomNumber(anchor) }}</div>
     <div class="anchor-summary">
       <div class="anchor-state"><span class="anchor-status" role="status" :title="statusDetail(anchor)"><i :class="{'is-recording':anchor.recording,'is-enabled':anchor.enabled}" aria-hidden="true"/>{{ status(anchor) }}</span></div>
@@ -45,8 +68,8 @@ const roomNumber=anchor=>anchor.ownWebRid||(anchor.platform==='douyin'?(anchor.l
 .anchor-heading{display:flex;align-items:center;gap:6px;min-width:0}
 .anchor-heading strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;line-height:1.6}
 .anchor-room{margin-top:2px;font-size:11px;line-height:1.6;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.anchor-remove{display:grid;place-items:center;width:24px;height:24px;flex-shrink:0;margin-right:-4px;padding:0;border:0;border-radius:var(--radius-control);background:transparent;color:var(--faint)}
-.anchor-remove:hover{background:var(--anchor-remove-hover);color:var(--text)}
+.anchor-menu-trigger{display:grid;place-items:center;width:24px;height:24px;flex-shrink:0;margin-right:-4px;padding:0;border:0;border-radius:var(--radius-control);background:transparent;color:var(--faint)}
+.anchor-menu-trigger:hover{background:var(--anchor-remove-hover);color:var(--text)}
 .anchor-summary{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:5px;min-height:26px}
 .anchor-state{display:flex;flex-wrap:wrap;align-items:center;gap:5px 7px;min-width:0}
 .anchor-status{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:18px;color:var(--muted)}

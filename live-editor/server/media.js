@@ -377,11 +377,11 @@ export class Media {
       await active.done;
     } finally { this.previews.delete(token); }
   }
-  async enqueue(id, input) {
-    const operation={sessionId:id,done:this.enqueueInternal(id,input)};this.enqueues.add(operation);
+  async enqueue(id, input, options) {
+    const operation={sessionId:id,done:this.enqueueInternal(id,input,options)};this.enqueues.add(operation);
     try{return await operation.done;}finally{this.enqueues.delete(operation);}
   }
-  async enqueueInternal(id, input) {
+  async enqueueInternal(id, input, {autoPost} = {}) {
     this.assertSessionAvailable(id);
     const session=this.store.session(id); if(!session) throw new Error('找不到录像。');
     const scope=input.scope??'clips';if(!['clips','full'].includes(scope))throw new Error('请选择有效的导出范围。');
@@ -400,6 +400,7 @@ export class Media {
     // must not leave an invisible subset exporting in the background.
     const batchId=randomUUID(),jobs=(scope==='full'?[ranges]:ranges.map(range=>[range])).map((part,index)=>({id:randomUUID(),session:id,ranges:part,excluded:[...edit.excluded],highlighted:[...(edit.highlighted||[])],highlightStyle:savedHighlightStyle(this.store),messageEdits:edit.messageEdits||{},filterLottery:edit.filterLottery!==false,revision:edit.revision,font:this.fonts.selected(),danmakuStyle:savedDanmakuStyle(this.store),danmakuPerSecond:chatRate(this.store),mode,scope,batchId,clipIndex:index+1,clipCount:scope==='full'?1:ranges.length}));
     for(const job of jobs) {
+      if(autoPost)job.autoPost=autoPost;
       job.linkmicEvents=linkmicEvents.filter(event=>event.participants.length&&job.ranges.some(range=>event.time<range.end&&event.end>range.start));
       job.recordingStyle=savedRecordingStyle(this.store);
       job.cameraEvents=cameraEvents.filter(event=>job.ranges.some(range=>event.time<range.end&&event.end>range.start));

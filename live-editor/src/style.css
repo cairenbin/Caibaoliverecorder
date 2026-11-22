@@ -599,6 +599,9 @@ svg { flex-shrink: 0; }
 .job-row small { font-size: 11px; color: var(--faint); margin-left: auto; }
 .job-ok { color: var(--mint); }
 .job-bad { color: var(--danger-text); }
+.auto-post-jobs { padding-top: 14px; border-top: 1px solid var(--line); }
+.auto-post-jobs .job-row strong { min-width: 0; overflow-wrap: anywhere; }
+.auto-post-jobs .job-row small { flex-shrink: 0; }
 .job-row progress {
   appearance: none;
   -webkit-appearance: none;

@@ -1,6 +1,6 @@
 // The app owns its tasks until readers, writers and external processes settle.
 export function closeAppWith({
-  beginClosing, timers, liveHealth, lotteries, updates, ingestor, media, recorder, linkmic,
+  beginClosing, timers, liveHealth, lotteries, updates, ingestor, media, recorder, linkmic, autoPost,
   deletionMaintenance, deletingSessions, preparation, waveform, density, clients, server,
   storage, getStartupRecovery, credentials, diagnostics, store, runtime,
 }) {
@@ -18,6 +18,7 @@ export function closeAppWith({
       await preparationClosed;
       await deletionsClosed;
       await getStartupRecovery();
+      await autoPost?.close();
       await media.waitForSaves();
       await Promise.allSettled([...media.probes,...media.enqueues,...media.previews.values()].map(operation=>operation.done));
       await httpClosed;

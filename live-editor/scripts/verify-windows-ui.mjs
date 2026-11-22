@@ -21,6 +21,45 @@ const request=async(action)=>{
  endpoint=await readEndpoint();if(!endpoint)return;
  try{return await fetch(endpoint.origin+'/internal/desktop',{method:'POST',headers:{'X-Caibo-Instance':endpoint.token,'Content-Type':'application/json'},body:JSON.stringify(action),signal:AbortSignal.timeout(3000)});}catch{}
 };
+async function verifyAutoPostMenu(page){
+ const base=await page.evaluate(async()=>await (await fetch('/api/state')).json());
+ assert.equal(base.autoPost?.simulation,true,'The packaged backend must be in simulated submission mode');
+ assert.equal(base.autoPost.cookieConfigured,false,'A fresh package must not contain a Bilibili Cookie');
+ let cookieConfigured=false;
+ const anchors=[
+  {key:'bilibili:1001',platform:'bilibili',roomId:'1001',name:'投稿测试主播',enabled:true},
+  {key:'douyin:1002',platform:'douyin',roomId:'1002',name:'抖音测试主播',enabled:true}
+ ];
+ const snapshot=()=>({...base,anchors,recorder:{...base.recorder,biliOnline:true,douyinOnline:true},autoPost:{...base.autoPost,cookieConfigured}});
+ await page.route('**/api/state',route=>route.fulfill({json:snapshot()}));
+ await page.route('**/api/events',route=>route.fulfill({contentType:'text/event-stream',body:`data: ${JSON.stringify(snapshot())}\n\n`}));
+ await page.route('**/api/anchors/*/auto-post',route=>route.fulfill({json:{
+  enabled:false,titleTemplate:'A的直播回放｜{录制日期}',description:'示例简介',
+  homepage:'https://space.bilibili.com/123',tags:['直播回放'],categoryId:171,mode:'danmaku'
+ }}));
+ const settings=page.getByRole('menuitem',{name:'自动投稿设置',exact:true});
+ const remove=page.getByRole('menuitem',{name:'移除监控',exact:true});
+ for(const [configured,name,showSettings] of [
+  [false,'投稿测试主播',false], [true,'抖音测试主播',false], [true,'投稿测试主播',true]
+ ]){
+  cookieConfigured=configured;
+  await page.reload();
+  await page.locator('.monitored-anchor').filter({hasText:name}).click({button:'right',timeout:10000});
+  await remove.waitFor({state:'visible',timeout:5000});
+  assert.equal(await settings.isVisible(),showSettings);
+ }
+ await settings.click();
+ const form=page.locator('.auto-post-settings');
+ const toggle=form.getByLabel('为这位主播开启自动投稿');
+ await toggle.waitFor({state:'visible',timeout:5000});
+ assert.equal(await toggle.isChecked(),false);
+ await toggle.check();
+ const preview=form.locator('#auto-post-preview');
+ await preview.waitFor({state:'visible',timeout:5000});
+ assert.match(await preview.innerText(),/A的直播回放｜\d{1,2}月\d{1,2}日/);
+ await form.locator('[name="auto-post-mode"][value="dual"]').check();
+ await form.getByText('P1 弹幕版 · P2 纯净版',{exact:true}).waitFor({state:'visible',timeout:5000});
+}
 try{
  child=spawn(exe,[],{cwd:root,stdio:'ignore',env:{...process.env,NO_RECORDER:'1',EDITOR_DESKTOP_MANAGED:'1',RECORDER_PROJECT_ROOT:root,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${debugPort}`}});
  child.on('exit',(code,signal)=>record('desktop-exit',{code,signal}));
@@ -57,6 +96,10 @@ try{
   await page.getByRole('button',{name:'设置',exact:true}).waitFor({state:'visible',timeout:10000});
   assert.equal(await page.evaluate(async()=>(await fetch('/api/state')).status),200);
   record('authenticated-reload');
+  if(process.argv.includes('--auto-post')){
+   await verifyAutoPostMenu(page);
+   record('auto-post-menu-preview');
+  }
  }finally{
   try{await page.screenshot({path:path.join(out,'final-page.png'),timeout:5000});}catch{}
   try{await fs.writeFile(path.join(out,'page.txt'),(await page.locator('body').innerText({timeout:3000})).slice(0,16000));}catch{}

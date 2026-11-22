@@ -39,6 +39,7 @@ import { DailyDiagnostics } from './diagnostics.js';
 import { listenLocal } from './local-endpoint.js';
 import { DanmakuStylePreview } from './danmaku-style-preview.js';
 import { LinkmicIndex } from './linkmic.js';
+import {AutoPost} from './auto-post.js';
 import {PlatformCredentials,COOKIE_PLATFORMS} from './platform-credentials.js';
 import {PlatformCookieValidation} from './platform-cookie-validation.js';
 
@@ -120,8 +121,14 @@ async function createManagedApp(options,runtime) {
   const deleteMaterial=(id,options)=>deletingSessions.delete(id,options);
   const deletionMaintenance=new DeletionMaintenance(store,{remove:deleteMaterial,busy:()=>closing||deletingSessions.size>0||ingestor.busy||storage.busy||waveform.active||!!preparation.active||media.previews.size>0||media.hasForegroundWork()||recorder.rooms.some(room=>room.recording)||!!store.get("SELECT id FROM sessions WHERE deleted_at='' AND status<>'finished' LIMIT 1")});
   autoUpdate=new AutoUpdate({updates,runtime,appRoot,projectRoot,activity,quit:()=>desktopExit.request(false)});
-  const snapshot=()=>workbenchSnapshot({
-    store,recorder,diagnostics,updates,preparation,deletingSessions,root,settingsSnapshot,credentialWarnings:credentials.warnings()
+  const autoPost=new AutoPost(store,credentials,media,()=>recorder.anchors,()=>closing||store.recovery.recovering||
+    autoUpdate.applying||(!options.noRecorder&&recorder.connectionPending)||hasRecording(store,recorder)||
+    storage.busy||hasIndexing(store)||media.hasForegroundWork());
+  recorder.bilibili.onRecordingOpened=session=>autoPost.capture(session);
+  const snapshot=()=>({
+    ...workbenchSnapshot({store,recorder,diagnostics,updates,preparation,deletingSessions,root,
+      settingsSnapshot,credentialWarnings:credentials.warnings()}),
+    autoPost:autoPost.snapshot(),
   });
   const server=http.createServer(async(req,res)=>{
     try {
@@ -177,8 +184,19 @@ async function createManagedApp(options,runtime) {
       }
       if(p==='/api/follow-users'&&req.method==='POST')return json(res,await recorder.douyin.following.add((await body(req)).url));
       if(p==='/api/anchors'&&req.method==='POST')return json(res,await recorder.addAnchor(await body(req)));
+      const autoPostAnchor=/^\/api\/anchors\/bilibili(?::|%3a)(\d{1,20})\/auto-post$/i.exec(p);
+      const autoPostRetry=/^\/api\/auto-post\/([a-z0-9-]{1,64})\/retry$/i.exec(p);
+      if(autoPostRetry&&req.method==='POST')return json(res,autoPost.retry(autoPostRetry[1]));
+      if(autoPostAnchor&&['GET','POST'].includes(req.method)) {
+        const input=req.method==='POST'?await body(req,16384):undefined;
+        return json(res,autoPost.settings('bilibili:'+autoPostAnchor[1],input));
+      }
       const anchorAction=p.match(/^\/api\/anchors\/([a-z-]+:\d{1,20}|xiaohongshu-user:[a-f0-9]{24})\/(start|stop|remove)$/);
-      if(anchorAction&&req.method==='POST'&&recorder.platformForAnchor(anchorAction[1])){await recorder.anchorAction(anchorAction[1],anchorAction[2],await body(req));return json(res,{anchors:recorder.anchors});}
+      if(anchorAction&&req.method==='POST'&&recorder.platformForAnchor(anchorAction[1])) {
+        await recorder.anchorAction(anchorAction[1],anchorAction[2],await body(req));
+        if(anchorAction[2]==='remove')autoPost.remove(anchorAction[1]);
+        return json(res,{anchors:recorder.anchors});
+      }
       const followAction=p.match(/^\/api\/follow-users\/(\d{1,20})\/(enable|remove)$/);
       if(followAction&&req.method==='POST'){const input=await body(req);if(followAction[2]==='enable')await recorder.douyin.following.enable(followAction[1],input.enabled);else await recorder.douyin.following.remove(followAction[1],input.confirmed);return json(res,{following:recorder.douyin.followingSnapshot});}
       if(p==='/api/rooms'&&req.method==='POST'){
@@ -259,6 +277,7 @@ async function createManagedApp(options,runtime) {
   let nextTemporarySweep=0;
   const maintain=()=>{
     if(closing||store.recovery.recovering||autoUpdate.applying)return;
+    void autoPost.tick()?.catch(error=>diagnostics.record('自动投稿',error,{level:'警告'}));
     void deletionMaintenance.tick().catch(error=>{deletionMaintenance.lastError=error.message;diagnostics.record('自动清理',error,{level:'警告'});});
     if(options.compact!==false)void storage.tick().catch(error=>{storage.lastError=error.message;diagnostics.record('素材整理',error,{level:'警告'});});
     if(Date.now()>=nextTemporarySweep){nextTemporarySweep=Date.now()+60000;void media.cleanupStaleTemporary().catch(error=>{media.temporaryCleanupError=error.message;diagnostics.record('缓存清理',error,{level:'警告'});});}
@@ -305,7 +324,7 @@ async function createManagedApp(options,runtime) {
   const diagnosticTimer=setInterval(diagnosticPoll,30000);diagnosticPoll();
   if(!options.noRecorder){void recorder.start().catch(e=>{recorder.bilibili.error=e.message;});}
   const close=closeAppWith({
-    beginClosing:()=>{closing=true;cookieValidation.close();}, timers:[timer,maintenanceTimer,runtimeTimer,diagnosticTimer],
+    beginClosing:()=>{closing=true;cookieValidation.close();}, autoPost, timers:[timer,maintenanceTimer,runtimeTimer,diagnosticTimer],
     liveHealth,lotteries,updates,ingestor,media,recorder,linkmic,deletionMaintenance,deletingSessions,
     preparation,waveform,density,clients,server,storage,getStartupRecovery:()=>startupRecovery,
     credentials,diagnostics,store,runtime,
