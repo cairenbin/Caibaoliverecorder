@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { AutoPost } from '../server/auto-post.js';
 import { BackgroundPreparation } from '../server/background-preparation.js';
+import { BilibiliPlatform } from '../server/bilibili-platform.js';
 import { CompactStorage } from '../server/compact-storage.js';
 import { clipFile } from '../server/output-names.js';
 import { Store } from '../server/store.js';
@@ -44,11 +45,14 @@ async function setup(t) {
     async submit(input) { submitted.push(input); return { taskId: 'fixture-task' }; },
     async task(task) { assert.equal(task, 'fixture-task'); return { status: 'submitted', bvid: 'BVtest001' }; },
   };
-  const service = (busy = () => false) => new AutoPost(store, credentials, media, () => [{ key }], busy, publisher);
+  const recorder = new BilibiliPlatform(store);
+  recorder.rooms = [{ roomId: 123 }];
+  const service = (busy = () => false, sourceRecorder = recorder) =>
+    new AutoPost(store, credentials, media, sourceRecorder, busy, publisher);
   return { root, store, credentials, history, submitted, publisher, media, service };
 }
 
-test('只在已有 B站 Cookie 的 B站主播上开启，旧素材不加入自动投稿', async t => {
+test('投稿到 B站需要其 Cookie，并且只为已有监控主播登记新素材', async t => {
   const { store, credentials, service } = await setup(t);
   const autoPost = service();
   assert.equal(autoPost.snapshot().cookieConfigured, false);
@@ -59,13 +63,13 @@ test('只在已有 B站 Cookie 的 B站主播上开启，旧素材不加入自�
   await assert.rejects(() => autoPost.settings(key, settings), /bili_jct/);
   credentials.cookie += '; bili_jct=mock-csrf';
   await assert.rejects(() => autoPost.settings(key, { ...settings, accountUid: '456' }), /账号已改变/);
-  await assert.rejects(() => autoPost.settings('douyin:123', settings), /B站监控主播/);
+  await assert.rejects(() => autoPost.settings('douyin:123', settings), /找不到这个监控主播/);
   assert.equal((await autoPost.settings(key)).enabled, false);
   assert.equal((await autoPost.settings(key)).copyright, '');
   await assert.rejects(autoPost.settings(key, { ...settings, copyright: '' }), /自制或转载/);
   const earlier = store.createSession({ room: 123, created: '2000-01-01T12:00:00Z' });
   await autoPost.settings(key, settings);
-  autoPost.capture(earlier);
+  autoPost.capture(earlier, key);
   assert.equal(autoPost.snapshot().jobs.length, 0);
   assert.doesNotMatch(JSON.stringify(await autoPost.settings(key)), /SESSDATA|synthetic/);
   await autoPost.settings(key, { ...settings, enabled: false, categoryId: '1' });
@@ -81,8 +85,8 @@ test('封口后只建一个导出任务，恢复后继续同一任务并按指�
   const date = new Date(Date.now() + 1000);
   const session = store.createSession({ room: 123, created: date.toISOString() });
   const source = store.addSource(session.id, path.join(root, 'original.flv'), 0, session.created, false);
-  autoPost.capture(session);
-  autoPost.capture(session);
+  autoPost.capture(session, key);
+  autoPost.capture(session, key);
   await autoPost.tick();
   assert.equal(history.length, 0);
   store.run("UPDATE sessions SET duration=3,status='finished' WHERE id=?", session.id);
@@ -144,7 +148,7 @@ test('自动投稿优先预处理同一素材并在完成后只创建一次导�
   const autoPost = service();
   await autoPost.settings(key, settings);
   const session = finished('auto', new Date(Date.now() + 1000).toISOString());
-  autoPost.capture(session);
+  autoPost.capture(session, key);
   await autoPost.tick();
   assert.equal(autoPost.snapshot().jobs[0].stage, 'waiting-preparation');
   assert.deepEqual(history, []);
@@ -155,7 +159,7 @@ test('自动投稿优先预处理同一素材并在完成后只创建一次导�
   assert.deepEqual(history, [{ id: session.id, scope: 'full', mode: 'dual' }]);
 
   const failed = finished('failed', new Date(Date.now() + 2000).toISOString());
-  autoPost.capture(failed);
+  autoPost.capture(failed, key);
   store.run("UPDATE preparation_jobs SET status='error' WHERE session=?", failed.id);
   await autoPost.tick();
   assert.equal(history.at(-1).id, failed.id);
@@ -175,7 +179,7 @@ test('录制中开启自动投稿可登记当前场，只在手动停止并完�
   const imported = store.createSession({ room: 123, created: '2026-11-22T16:05:00Z' });
   store.addSource(imported.id, path.join(root, 'imported.flv'), 0, imported.created, false);
 
-  autoPost.capture(current);
+  autoPost.capture(current, key);
   assert.deepEqual(autoPost.snapshot().jobs, []);
   await autoPost.settings(key, settings);
   await autoPost.settings(key, settings);
@@ -207,7 +211,7 @@ test('素材整理的空轮询不会阻止同一轮自动导出', async t => {
   store.run('UPDATE sessions SET duration=3 WHERE id=?', session.id);
   store.run('UPDATE sources SET closed=2 WHERE id=?', source.id);
   store.run("INSERT INTO source_storage(source,eligible,mode,status) VALUES(?,1,'direct','done')", source.id);
-  autoPost.capture(session);
+  autoPost.capture(session, key);
 
   // The production timer launches both operations without awaiting either.
   const posting = autoPost.tick();
@@ -215,6 +219,66 @@ test('素材整理的空轮询不会阻止同一轮自动导出', async t => {
   await Promise.all([posting, compaction]);
   assert.deepEqual(history, [{ id: session.id, scope: 'full', mode: 'dual' }]);
   assert.equal(autoPost.snapshot().jobs[0].status, 'exporting');
+});
+
+test('抖音和小红书可以投稿到同一个 B站账号，主播设置和录像分别归属', async t => {
+  const { root, store, credentials, service, history } = await setup(t);
+  credentials.configured = true;
+  credentials.cookie = 'SESSDATA=synthetic; DedeUserID=123; bili_jct=mock-csrf';
+  const douyin = 'douyin-user:123', xiaohongshu = 'xiaohongshu-user:abcdef0123456789abcdef01';
+  const open = new Map();
+  const recorder = { anchors: [key, douyin, xiaohongshu].map(key => ({ key })),
+    recordingForAnchor: key => open.get(key) };
+  const autoPost = service(undefined, recorder);
+  await autoPost.settings(key, { ...settings, enabled: false });
+  await autoPost.settings(douyin, { ...settings, homepage: 'https://www.douyin.com/user/EXAMPLE123', titleTemplate: '抖音录像' });
+  const xhsSession = store.createSession({ room: 0 });
+  open.set(xiaohongshu, xhsSession);
+  await autoPost.settings(xiaohongshu, { ...settings, homepage: 'https://xhslink.cn/o/example', titleTemplate: '小红书录像', mode: 'clean' });
+  const douyinSession = store.createSession({ room: 0, created: new Date(Date.now() + 1000).toISOString() });
+  autoPost.capture(douyinSession, douyin);
+  autoPost.capture(douyinSession, douyin);
+  const legacyImport = store.createSession({ room: 0, status: 'finished' });
+  autoPost.capture(legacyImport);
+
+  assert.equal((await autoPost.settings(key)).enabled, false);
+  assert.equal((await autoPost.settings(douyin)).titleTemplate, '抖音录像');
+  assert.equal((await autoPost.settings(xiaohongshu)).mode, 'clean');
+  assert.deepEqual(autoPost.snapshot().jobs.map(job => [job.session, job.title]),
+    [[douyinSession.id, '抖音录像'], [xhsSession.id, '小红书录像']]);
+  await autoPost.tick();
+  assert.deepEqual(history, []);
+
+  for (const session of [xhsSession, douyinSession]) {
+    const source = store.addSource(session.id, path.join(root, session.id + '.flv'), 0, session.created, true);
+    store.run('UPDATE sources SET closed=2 WHERE id=?', source.id);
+    store.run("UPDATE sessions SET duration=3,status='finished' WHERE id=?", session.id);
+  }
+  await autoPost.tick();
+  await autoPost.tick();
+  assert.deepEqual(history, [{ id: xhsSession.id, scope: 'full', mode: 'clean' },
+    { id: douyinSession.id, scope: 'full', mode: 'dual' }]);
+  autoPost.remove(xiaohongshu);
+  assert.equal(autoPost.snapshot().jobs.find(job => job.session === xhsSession.id).status, 'cancelled');
+  assert.equal(autoPost.snapshot().jobs.find(job => job.session === douyinSession.id).status, 'exporting');
+});
+
+test('抖音旧直播间识别为主播后沿用原投稿授权和排队任务', async t => {
+  const { store, credentials, service } = await setup(t);
+  credentials.configured = true;
+  credentials.cookie = 'SESSDATA=synthetic; DedeUserID=123; bili_jct=mock-csrf';
+  const previous = 'douyin:123', key = 'douyin-user:911';
+  const session = store.createSession({ room: 0 });
+  const recorder = { anchors: [{ key: previous }], recordingForAnchor: () => session };
+  const autoPost = service(undefined, recorder);
+  await autoPost.settings(previous, settings);
+  autoPost.moveAnchor(previous, key);
+  recorder.anchors = [{ key }];
+  await autoPost.tick();
+  assert.equal(autoPost.snapshot().jobs[0].status, 'queued');
+  assert.equal((await autoPost.settings(key)).enabled, true);
+  assert.equal(store.setting('bilibili-auto-post:'+previous), undefined);
+  assert.equal(store.get('SELECT room FROM auto_post_jobs WHERE session=?', session.id).room, key);
 });
 
 
@@ -250,7 +314,7 @@ test('上传工具响应丢失时保留待核对状态，重启或重试不会�
   const source = store.addSource(session.id, path.join(root, 'original.flv'), 0, session.created, true);
   store.run('UPDATE sessions SET duration=3 WHERE id=?', session.id);
   store.run('UPDATE sources SET closed=2 WHERE id=?', source.id);
-  autoPost.capture(session);
+  autoPost.capture(session, key);
   await autoPost.tick();
   const clean = path.join(root, 'existing.mp4');
   await fs.writeFile(clean, 'fixture');
@@ -281,12 +345,12 @@ test('关闭再开启不会补投已取消的成片，显式重开可登记正�
   const autoPost = service();
   await autoPost.settings(key, settings);
   const previous = store.createSession({ room: 123, status: 'finished', created: new Date(Date.now() + 1000).toISOString() });
-  autoPost.capture(previous);
+  autoPost.capture(previous, key);
   const previousTitle = autoPost.snapshot().jobs[0].title;
   const current = store.createSession({ room: 123, status: 'recording', created: new Date(Date.now() + 2000).toISOString() });
   const source = store.addSource(current.id, path.join(root, 'current.flv'), 0, current.created, false);
   store.run('INSERT INTO source_storage(source,eligible) VALUES(?,1)', source.id);
-  autoPost.capture(current);
+  autoPost.capture(current, key);
   await autoPost.settings(key, { ...settings, enabled: false });
   assert(autoPost.snapshot().jobs.every(job => job.status === 'cancelled'));
   await autoPost.settings(key, { ...settings, titleTemplate: '重新开启后的标题' });

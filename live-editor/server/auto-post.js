@@ -1,10 +1,14 @@
 import { renderAutoPostDescription, renderAutoPostTitle } from '../shared/auto-post-template.js';
 import { normalizePublicationTags } from '../shared/publication-tags.js';
 import { publicationFiles } from './publication-files.js';
+import { isDouyinMonitorLink } from './douyin-user-discovery.js';
+import { isXiaohongshuLink } from './xiaohongshu-room.js';
 
 const MODES = ['danmaku', 'clean', 'dual'];
-const anchorPattern = /^bilibili:(\d{1,20})$/;
-const settingsKey = id => `bilibili-auto-post:${id}`;
+// Keep the saved keys and job identities already used by Bilibili recordings.
+const storedAnchor = key => /^bilibili:(\d{1,20})$/.exec(key)?.[1] ?? key;
+const sourceAnchor = value => /^\d+$/.test(value) ? `bilibili:${value}` : value;
+const settingsKey = key => `bilibili-auto-post:${storedAnchor(key)}`;
 const defaults = { enabled: false, titleTemplate: '', description: '', homepage: '', tags: [], categoryId: '', mode: 'danmaku', copyright: '', source: '' };
 const unknownSubmission = '无法确认稿件是否已提交，请在 B站创作中心核对。';
 const pausedBeforeSubmission = Symbol('paused before submission');
@@ -24,7 +28,10 @@ function normalize(input) {
   if (input.enabled && renderAutoPostTitle(titleTemplate, new Date()).length > 80) throw new Error('投稿标题最多 80 个字符。');
   if (homepage) {
     const url = URL.parse(homepage);
-    if (url?.protocol !== 'https:' || url.hostname !== 'space.bilibili.com' || url.username || url.password || url.port) throw new Error('请填写 B站主播主页链接。');
+    if (url?.protocol !== 'https:' || url.username || url.password || url.port ||
+      !(url.hostname === 'space.bilibili.com' || isDouyinMonitorLink(url.href) || isXiaohongshuLink(url.href))) {
+      throw new Error('请填写 B站、抖音或小红书的主播主页链接。');
+    }
   }
   if (input.enabled && renderAutoPostDescription(description, homepage).length > 2000) throw new Error('简介与主播主页合计最多 2000 个字符。');
   const categoryId = String(input.categoryId ?? '');
@@ -37,8 +44,8 @@ function normalize(input) {
 }
 
 export class AutoPost {
-  constructor(store, credentials, media, anchors, busy, publisher) {
-    Object.assign(this, { store, credentials, media, anchors, busy, publisher, active: null });
+  constructor(store, credentials, media, recorder, busy, publisher) {
+    Object.assign(this, { store, credentials, media, recorder, busy, publisher, active: null });
     store.db.exec(`CREATE TABLE IF NOT EXISTS auto_post_jobs(
       session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
       room TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL,
@@ -48,39 +55,32 @@ export class AutoPost {
 
   get configured() { return this.credentials.snapshot().platforms.bilibili.configured; }
   get uid() { return this.credentials.get('bilibili').match(/(?:^|;\s*)DedeUserID=(\d+)/)?.[1] || ''; }
+  hasAnchor(key) { return this.recorder.anchors.some(item => item.key === key); }
 
   async settings(key, input) {
-    const room = anchorPattern.exec(key)?.[1];
-    if (!room || !this.anchors().some(item => item.key === key)) throw new Error('找不到这个 B站监控主播。');
+    if (!this.hasAnchor(key)) throw new Error('找不到这个监控主播。');
     if (!this.configured) throw new Error('请先填写 B站 Cookie。');
     const publication = this.publisher.snapshot();
     const uid = publication.accountUid || '';
-    let stored = this.store.setting(settingsKey(room)) || defaults;
+    let stored = this.store.setting(settingsKey(key)) || defaults;
     if (input !== undefined) {
       const next = normalize(input);
       if (next.enabled) {
         if (!publication.configured || !uid) throw new Error(publication.accountError || 'B站 Cookie 当前不可用。');
         if (String(input.accountUid) !== uid) throw new Error('投稿账号已改变，请重新打开设置。');
         await this.publisher.assertCategory(next.categoryId, uid);
-        if (!this.anchors().some(item => item.key === key)) throw new Error('找不到这个 B站监控主播。');
-        stored = this.store.setting(settingsKey(room)) || defaults;
+        if (!this.hasAnchor(key)) throw new Error('找不到这个监控主播。');
+        stored = this.store.setting(settingsKey(key)) || defaults;
       }
       const retainTime = next.enabled && stored.live && stored.enabled && stored.uid === uid;
       const enabledAt = retainTime ? stored.enabledAt : Math.max(Date.now(), (stored.enabledAt || 0) + 1);
       stored = { ...next, uid, live: next.enabled, enabledAt };
       this.store.transaction(() => {
-        this.store.setting(settingsKey(room), stored);
-        if (!stored.enabled) this.cancelUnsubmitted(room);
-        // A user may opt in after FileOpening. An open source marked by the
-        // Bilibili recorder identifies this session without looking back at imports.
-        if (stored.enabled) {
-          const session = this.store.get(`SELECT s.id,s.created FROM sessions s
-            WHERE s.room=? AND s.status='recording' AND s.deleted_at=''
-            AND EXISTS (SELECT 1 FROM sources src JOIN source_storage ss ON ss.source=src.id
-              WHERE src.session=s.id AND src.closed=0 AND ss.eligible=1)
-            ORDER BY s.created DESC LIMIT 1`, Number(room));
-          if (session) this.queue(session, room, stored);
-        }
+        this.store.setting(settingsKey(key), stored);
+        if (!stored.enabled) this.cancelUnsubmitted(key);
+        // Opting in during recording covers the open capture, never older material.
+        const session = stored.enabled ? this.recorder.recordingForAnchor(key) : null;
+        if (session) this.queue(session, key, stored);
       });
     }
     const { uid: savedUid, enabledAt, live, ...visible } = stored;
@@ -88,35 +88,48 @@ export class AutoPost {
       account: uid ? { uid } : null, accountError: publication.accountError };
   }
 
-  capture(session) {
-    const room = String(session.room), config = this.store.setting(settingsKey(room));
+  capture(session, key) {
+    if (!key) return;
+    const config = this.store.setting(settingsKey(key));
     const start = Date.parse(session.created);
     if (!config?.live || !config.enabled || !config.uid || !this.configured || !Number.isFinite(start) || start < config.enabledAt) return;
-    if (!this.anchors().some(item => item.key === `bilibili:${room}`)) return;
-    this.queue(session, room, config);
+    if (this.hasAnchor(key)) this.queue(session, key, config);
   }
 
-  queue(session, room, config) {
+  queue(session, key, config) {
     const date = new Date(session.created);
     if (!Number.isFinite(date.getTime())) return;
     const title = renderAutoPostTitle(config.titleTemplate, date);
     const result = this.store.run(`INSERT INTO auto_post_jobs(session,room,config,status) VALUES(?,?,?,'queued')
-      ON CONFLICT(session) DO UPDATE SET config=excluded.config,status='queued',export_job=NULL,error='',result=NULL
+      ON CONFLICT(session) DO UPDATE SET room=excluded.room,config=excluded.config,status='queued',export_job=NULL,error='',result=NULL
       WHERE auto_post_jobs.status='cancelled'`,
-      session.id, room, JSON.stringify({ ...config, title }));
-    if (result.changes) this.store.diagnostics?.record('自动投稿', `房间 ${room}：已登记，等待录像收尾。`);
+      session.id, storedAnchor(key), JSON.stringify({ ...config, title }));
+    if (result.changes) this.store.diagnostics?.record('自动投稿', `${key}：已登记，等待录像收尾。`);
   }
 
   remove(key) {
-    const room = anchorPattern.exec(key)?.[1];
-    if (!room) return;
-    this.store.run('DELETE FROM settings WHERE key=?', settingsKey(room));
-    this.cancelUnsubmitted(room);
+    this.store.transaction(() => {
+      this.store.run('DELETE FROM settings WHERE key=?', settingsKey(key));
+      this.cancelUnsubmitted(key);
+    });
   }
 
-  cancelUnsubmitted(room) {
+  moveAnchor(previousKey, key) {
+    const config = this.store.setting(settingsKey(previousKey));
+    if (!config) return;
+    this.store.transaction(() => {
+      if (this.store.setting(settingsKey(key))) this.cancelUnsubmitted(previousKey);
+      else {
+        this.store.setting(settingsKey(key), config);
+        this.store.run('UPDATE auto_post_jobs SET room=? WHERE room=?', storedAnchor(key), storedAnchor(previousKey));
+      }
+      this.store.run('DELETE FROM settings WHERE key=?', settingsKey(previousKey));
+    });
+  }
+
+  cancelUnsubmitted(key) {
     this.store.run(`UPDATE auto_post_jobs SET status='cancelled',error='' WHERE room=?
-      AND (status IN ('queued','exporting','blocked') OR (status='failed' AND json_extract(result,'$.taskId') IS NULL))`, room);
+      AND (status IN ('queued','exporting','blocked') OR (status='failed' AND json_extract(result,'$.taskId') IS NULL))`, storedAnchor(key));
   }
 
   retry(session) {
@@ -140,11 +153,11 @@ export class AutoPost {
   authorizes(session, uid, taskId) {
     const job = this.store.get("SELECT room,config,result FROM auto_post_jobs WHERE session=? AND status='uploading'", session);
     if (!job || !this.store.session(session)) return false;
-    const config = JSON.parse(job.config);
-    const current = this.store.setting(settingsKey(job.room));
+    const config = JSON.parse(job.config), key = sourceAnchor(job.room);
+    const current = this.store.setting(settingsKey(key));
     return current?.live === true && current.enabled && config.live === true && config.uid === uid && current.uid === uid &&
       current.enabledAt === config.enabledAt && JSON.parse(job.result || '{}').taskId === taskId &&
-      this.anchors().some(item => item.key === `bilibili:${job.room}`);
+      this.hasAnchor(key);
   }
 
   snapshot() {
@@ -187,9 +200,9 @@ export class AutoPost {
       WHERE s.deleted_at='' AND p.status IN ('queued','exporting','blocked')
       ORDER BY s.created ASC`);
     for (const row of rows) {
-      const config = JSON.parse(row.config), current = this.store.setting(settingsKey(row.room));
+      const key = sourceAnchor(row.room), config = JSON.parse(row.config), current = this.store.setting(settingsKey(key));
       if (!config.live || !current?.live || !current.enabled || config.enabledAt !== current.enabledAt ||
-          !this.anchors().some(item => item.key === `bilibili:${row.room}`)) {
+          !this.hasAnchor(key)) {
         this.status(row.session, 'cancelled');
         continue;
       }
@@ -217,7 +230,7 @@ export class AutoPost {
           }
           await this.media.enqueue(row.session, { scope: 'full', mode: config.mode }, { autoPost: row.session });
           this.status(row.session, 'exporting');
-          this.store.diagnostics?.record('自动投稿', `房间 ${row.room}：已加入导出队列。`);
+          this.store.diagnostics?.record('自动投稿', `${key}：已加入导出队列。`);
           return;
         }
         if (existing.status === 'done') {
@@ -241,10 +254,10 @@ export class AutoPost {
   }
 
   canSubmit(row, config, exportJob) {
-    const current = this.store.setting(settingsKey(row.room));
+    const key = sourceAnchor(row.room), current = this.store.setting(settingsKey(key));
     if (this.closed || this.busy() || !current?.live || !current.enabled || config.uid !== this.uid ||
         config.uid !== current.uid || config.enabledAt !== current.enabledAt ||
-        !this.anchors().some(item => item.key === `bilibili:${row.room}`)) return false;
+        !this.hasAnchor(key)) return false;
     if (!this.store.session(row.session) || this.store.deletingJobs?.has(exportJob.id)) return false;
     const output = this.store.get("SELECT file,mode,data FROM jobs WHERE id=? AND status='done'", exportJob.id);
     return !!output && output.file === exportJob.file && output.mode === exportJob.mode && output.data === exportJob.data;
@@ -270,7 +283,7 @@ export class AutoPost {
         },
       });
       this.saveResult(row.session, 'uploading', { ...result, taskId });
-      this.store.diagnostics?.record('自动投稿', `房间 ${row.room}：已加入投稿队列，共 ${parts.length} P。`);
+      this.store.diagnostics?.record('自动投稿', `${sourceAnchor(row.room)}：已加入投稿队列，共 ${parts.length} P。`);
     } catch (error) {
       if (error === pausedBeforeSubmission) {
         this.saveResult(row.session, 'exporting', result);

@@ -124,7 +124,7 @@ async function createManagedApp(options,runtime) {
   const deleteMaterial=(id,options)=>deletingSessions.delete(id,options);
   const deletionMaintenance=new DeletionMaintenance(store,{remove:deleteMaterial,busy:()=>closing||deletingSessions.size>0||ingestor.busy||storage.busy||waveform.active||!!preparation.active||media.previews.size>0||media.hasForegroundWork()||recorder.rooms.some(room=>room.recording)||!!store.get("SELECT id FROM sessions WHERE deleted_at='' AND status<>'finished' LIMIT 1")});
   autoUpdate=new AutoUpdate({updates,runtime,appRoot,projectRoot,activity,quit:()=>desktopExit.request(false)});
-  autoPost=new AutoPost(store,credentials,media,()=>recorder.anchors,()=>closing||store.recovery.recovering||
+  autoPost=new AutoPost(store,credentials,media,recorder,()=>closing||store.recovery.recovering||
     autoUpdate.applying||(!options.noRecorder&&recorder.connectionPending)||hasRecording(store,recorder)||
     storage.busy||hasIndexing(store)||media.hasForegroundWork({includeInteractive:false}),publisher);
   function activity(){
@@ -133,7 +133,7 @@ async function createManagedApp(options,runtime) {
   }
   const quickPublish=new QuickPublish(store,publisher);
   jobDeletion.isPublishing=id=>autoPost.isUploadingExport(id)||quickPublish.isBusy(id);
-  recorder.bilibili.onRecordingOpened=session=>autoPost.capture(session);
+  recorder.observeRecordings((session,key)=>autoPost.capture(session,key),(previous,key)=>autoPost.moveAnchor(previous,key));
   const snapshot=()=>({
     ...workbenchSnapshot({store,recorder,diagnostics,updates,preparation,deletingSessions,root,
       settingsSnapshot,credentialWarnings:credentials.warnings()}),
@@ -203,12 +203,12 @@ async function createManagedApp(options,runtime) {
         if(req.method==='GET')return json(res,await quickPublish.details(quickJob[1]));
         if(req.method==='POST')return json(res,await quickPublish.submit(quickJob[1],await body(req,16384)),202);
       }
-      const autoPostAnchor=/^\/api\/anchors\/bilibili(?::|%3a)(\d{1,20})\/auto-post$/i.exec(p);
+      const autoPostAnchor=/^\/api\/anchors\/([a-z-]+)(?::|%3a)([a-z0-9]{1,24})\/auto-post$/i.exec(p);
       const autoPostRetry=/^\/api\/auto-post\/([a-z0-9-]{1,64})\/retry$/i.exec(p);
       if(autoPostRetry&&req.method==='POST')return json(res,autoPost.retry(autoPostRetry[1]));
       if(autoPostAnchor&&['GET','POST'].includes(req.method)) {
         const input=req.method==='POST'?await body(req,16384):undefined;
-        return json(res,await autoPost.settings('bilibili:'+autoPostAnchor[1],input));
+        return json(res,await autoPost.settings(`${autoPostAnchor[1]}:${autoPostAnchor[2]}`,input));
       }
       const anchorAction=p.match(/^\/api\/anchors\/([a-z-]+:\d{1,20}|xiaohongshu-user:[a-f0-9]{24})\/(start|stop|remove)$/);
       if(anchorAction&&req.method==='POST'&&recorder.platformForAnchor(anchorAction[1])) {

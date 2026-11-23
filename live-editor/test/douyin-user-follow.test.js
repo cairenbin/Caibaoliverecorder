@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {Store} from '../server/store.js';
 import {DouyinRecorder} from '../server/douyin-recorder.js';
+import {DouyinPlatform} from '../server/douyin-platform.js';
 import {DouyinUserFollow} from '../server/douyin-user-follow.js';
 import {hasRecording,hasIndexing} from '../server/app-activity.js';
 import {FLV_HEADER,tags} from '../server/ingest.js';
@@ -40,6 +41,19 @@ test('move A to B releases only that target; shared and manual recordings remain
  f.replies.set(a,guest('456'));await f.poll();await until(()=>f.streams===2);assert.equal(f.recorder.rooms.length,2);assert.equal(f.recorder.rooms.find(r=>r.webRid==='123').followUsers,1);
  f.recorder.entries.get('123').enabled=true;await f.following.enable(b,false);assert.equal(f.recorder.entries.get('123').recording,true);
  await f.following.enable(a,false);assert.equal(f.recorder.entries.has('456'),false);assert.equal(f.recorder.entries.get('123').recording,true);
+});
+
+test('投稿归属采用已核验的本人主播或唯一跟录目标，共享连麦录像保持由用户选择',async t=>{
+ const f=await fixture(t),a=await f.enable('111'),b=await f.enable('222');
+ const {metadata}=guest();
+ const room={webRid:metadata.webRid,followOnly:true,enabled:false,followers:new Map([[a,metadata.roomId]])};
+ const resolve=()=>DouyinPlatform.prototype.anchorKeyForRecording.call({following:f.following},room,metadata);
+ assert.equal(resolve(),'douyin-user:'+a);
+ room.followers.set(b,metadata.roomId);
+ assert.equal(resolve(),'');
+ f.following.register({uid:metadata.ownerId,ownWebRid:metadata.webRid},{enabled:true});
+ room.followers.set(metadata.ownerId,metadata.roomId);
+ assert.equal(resolve(),'douyin-user:'+metadata.ownerId);
 });
 test('unknown or failed queries do not claim exit; three-minute protection closes and later re-verifies',async t=>{
  const f=await fixture(t),uid=await f.enable();f.replies.set(uid,guest());await f.poll();await until(()=>f.recorder.rooms[0]?.recording);

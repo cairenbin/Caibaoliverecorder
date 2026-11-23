@@ -43,6 +43,11 @@ export class FlvRecorder {
     for(const saved of Array.isArray(savedRooms)?savedRooms:[])if(saved&&typeof saved.webRid==='string'&&/^\d{1,20}$/.test(saved.webRid)&&this.entries.size<64)this.entries.set(saved.webRid,this.entry(saved));
   }
   entry(saved){return {webRid:saved.webRid,name:String(saved.name||this.label+'直播间').slice(0,100),title:String(saved.title||'').slice(0,300),autoRecord:saved.autoRecord!==false,enabled:saved.enabled!==false,followers:new Map(),streaming:false,recording:false,error:'',chatError:'',nextPoll:0,retryAt:0,recoveryFailures:0,recoveryReason:''};}
+  recordingForAnchor(key) {
+    const room = [...this.entries.values()].find(item => item.recording && item.recordingAnchorKey === key);
+    const session = room?.session && this.store.session(room.session);
+    return session?.status === 'recording' ? session : null;
+  }
   wanted(room){return room.enabled||[...room.followers.values()].some(roomId=>roomId===room.metadata?.roomId);}
   get rooms(){return [...this.entries.values()].map(room=>({platform:this.platform,roomId:this.platform+':'+room.webRid,webRid:room.webRid,name:room.name,title:room.title,followOnly:room.followOnly===true,streaming:room.streaming,recording:room.recording,recordingEnabled:this.wanted(room),followUsers:room.followers.size,autoRecord:room.autoRecord,autoRecordForThisSession:this.wanted(room),error:room.error,chatError:this.chat.snapshot?.(room.sourceId)?.error||room.chatError,chatStatus:room.sourceId?(this.chat.snapshot?.(room.sourceId)??null):null,recordingHealth:room.recoveryReason?{state:'recovering',message:room.recoveryReason}:null,recordingProgress:room.progress?{...room.progress}:null}));}
   async applyCredentials(){
@@ -170,6 +175,12 @@ export class FlvRecorder {
       xml=await openChatXml(source.xml);
       await appendChatXml(xml,`<?xml version="1.0" encoding="utf-8"?>\n<i><CaibaoRecordInfo platform="${this.platform}" roomid="${metadata.roomId}" web_rid="${room.webRid}" start_time="${wall}" title="${xmlText(metadata.title)}"/>\n`);
       this.store.run("UPDATE sessions SET status='recording',error='' WHERE id=?",session.id);room.recording=true;this.followCaptured?.(room);this.store.diagnostics?.record(this.label+'录制',`房间 ${room.webRid}：开始写入录像；素材 ${source.id}`);
+      try {
+        room.recordingAnchorKey ??= this.anchorKeyForRecording?.(room, metadata);
+        if (room.recordingAnchorKey) this.onRecordingOpened?.(session, room.recordingAnchorKey);
+      } catch (error) {
+        this.store.diagnostics?.record('自动投稿', error, {level:'警告'});
+      }
       normalizer=new FlvNormalizer();room.progress={observedAt:this.now(),bytes:0,mediaMs:0,writeLatencyMs:0,inFlightWriteSince:null};
       try{const chatCredentials=this.resolver.cookie?await this.resolver.cookie(signal):room.metadata||metadata;this.chat.start(source.id,{roomId:metadata.roomId,userUniqueId:chatCredentials.userUniqueId,cookie:chatCredentials.cookie,sourceStart:Date.parse(wall)},
         {write:async batch=>{
@@ -243,6 +254,7 @@ export class FlvRecorder {
     clearTimeout(room.recoveryTimer);room.recoveryTimer=null;room.recoveryReason='';room.recoveryFailures=0;
     room.abort?.abort();await room.active;
     if(room.session){this.store.run("UPDATE sessions SET status='finishing' WHERE id=? AND status IN ('recording','waiting')",room.session);room.session=null;room.actualRoom=null;}
+    room.recordingAnchorKey = null;
     if(!room.autoRecord)room.enabled=false;
   }
   async stopRoom(key){this.assertOpen();const room=this.room(key);room.enabled=false;this.save();if(!this.wanted(room))await this.finish(room);}

@@ -18,6 +18,15 @@ export class BilibiliPlatform extends Recorder {
     return this.roomSnapshots.map(room => roomAnchor(room, 'bilibili:' + room.roomId));
   }
 
+  recordingForAnchor(key) {
+    const room = Number(key.slice('bilibili:'.length));
+    return this.store.get(`SELECT s.id,s.created FROM sessions s
+      WHERE s.room=? AND s.status='recording' AND s.deleted_at=''
+      AND EXISTS (SELECT 1 FROM sources src JOIN source_storage ss ON ss.source=src.id
+        WHERE src.session=s.id AND src.closed=0 AND ss.eligible=1)
+      ORDER BY s.created DESC LIMIT 1`, room);
+  }
+
   ownsAnchor(key) {
     return key.startsWith('bilibili:');
   }

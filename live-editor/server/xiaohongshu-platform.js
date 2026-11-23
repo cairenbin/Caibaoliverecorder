@@ -60,8 +60,13 @@ export class XiaohongshuPlatform {
       const target = [...this.targets.values()].find(target => target.roomId === room.webRid);
       if (target && target.uid !== metadata.ownerId) throw Error('小红书直播间的主播身份已变化，等待重新核验。');
     };
+    this.core.anchorKeyForRecording = (room, metadata) => {
+      const target = this.targets.get(metadata.ownerId);
+      return target?.roomId === room.webRid ? userPrefix + target.uid : '';
+    };
   }
 
+  recordingForAnchor(key) { return this.core.recordingForAnchor(key); }
   get resolver() { return this.core.resolver; }
   get online() { return this.core.started && !this.core.closed; }
   get polling() { return this.core.polling || this.checking; }

@@ -16,6 +16,7 @@ export class DouyinPlatform {
     this.following = new DouyinUserFollow(store, { recorder: this.core, ...options.douyinFollow });
     this.roomTransfers = new Map();
     this.core.onRoomMetadata = (room, metadata) => this.adoptMonitoredRoom(room, metadata);
+    this.core.anchorKeyForRecording = (room, metadata) => this.anchorKeyForRecording(room, metadata);
   }
 
   get resolver() { return this.core.resolver; }
@@ -37,6 +38,21 @@ export class DouyinPlatform {
       ...rooms.map(room => roomAnchor(room, room.roomId)),
       ...targets.map(target => ({ ...target, key: userPrefix + target.uid, platform: this.id, legacy: false })),
     ];
+  }
+
+  recordingForAnchor(key) { return this.core.recordingForAnchor(key); }
+
+  anchorKeyForRecording(room, metadata) {
+    const host = this.following.targets.get(metadata.ownerId);
+    if (host?.ownWebRid === room.webRid && (room.enabled || room.followers.get(host.uid) === metadata.roomId)) {
+      return userPrefix + host.uid;
+    }
+    if (room.enabled && !room.followOnly) return roomPrefix + room.webRid;
+    // One room can be shared by several monitored co-hosts. Only a single
+    // verified follower can own the whole recording when the host is untracked.
+    const followers = [...room.followers].filter(([uid, roomId]) =>
+      roomId === metadata.roomId && this.following.targets.get(uid)?.enabled);
+    return followers.length === 1 ? userPrefix + followers[0][0] : '';
   }
 
   matchesLink(url, kind) {
@@ -65,6 +81,13 @@ export class DouyinPlatform {
     const task = (async () => {
       const identity = { uid: metadata.ownerId, name: metadata.name, ownWebRid: room.webRid, secUid: '', profile: '' };
       const target = this.following.register(identity, { enabled: room.enabled });
+      const previousKey = roomPrefix + room.webRid, key = userPrefix + target.uid;
+      try {
+        this.onAnchorReidentified?.(previousKey, key);
+        if (room.recordingAnchorKey === previousKey) room.recordingAnchorKey = key;
+      } catch (error) {
+        this.store.diagnostics?.record('自动投稿', error, {level:'警告'});
+      }
       if (room.enabled && !target.enabled) {
         target.enabled = true;
         target.state = '监控中，等待开播或连麦';

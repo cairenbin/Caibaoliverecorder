@@ -151,7 +151,7 @@ const sessionMenu=ref(null),confirmTarget=ref(null);
 const anchorMenu=ref(null), autoPostAnchor=shallowRef(null), anchorMenuElement=ref(null);
 let anchorModalReturnFocus=null;
 const activeAnchorMenuItem=computed(()=>state.value.anchors?.find(anchor=>anchor.key===anchorMenu.value?.key));
-const canConfigureAutoPost=anchor=>anchor?.platform==='bilibili'&&state.value.autoPost?.cookieConfigured===true;
+const canConfigureAutoPost=anchor=>!!anchor?.key&&state.value.autoPost?.cookieConfigured===true;
 const messageMenu=ref(null),senderFilter=ref(null);
 const messageEditTarget=ref(null);
 const lotteryTarget=ref(null),lotteryEditing=ref(false),lotteryLoading=ref(false),lotteryError=ref('');
@@ -1155,7 +1155,7 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
         <div class="confirm-actions"><button class="button" :disabled="modalBusy" @click="closeModal">{{ ui.common.取消 }}</button><button class="button primary" :disabled="modalBusy||!roomChoicePlatform" @click="confirmRoomChoice"><LoaderCircle v-if="modalBusy" class="spin" :size="16"/>{{ ui.workbench.确认添加 }}</button></div>
       </template>
       <template v-else-if="modal==='auto-post'&&autoPostAnchor">
-        <h2><PlatformBadge platform="bilibili" compact decorative/>{{ ui.autoPost.设置 }}</h2>
+        <h2>{{ ui.autoPost.设置 }}</h2>
         <p class="export-target">{{ autoPostAnchor.name }}</p>
         <AutoPostSettings :anchor="autoPostAnchor" @busy="modalBusy=$event" @saved="saveAutoPostSettings" @close="closeModal"/>
       </template>

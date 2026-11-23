@@ -20,6 +20,15 @@ export class MultiPlatformRecorder {
     return [...this.platforms.values()].flatMap(platform => platform.anchors);
   }
 
+  observeRecordings(opened, reidentified) {
+    this.bilibili.onRecordingOpened = session => opened(session, `bilibili:${session.room}`);
+    this.douyin.core.onRecordingOpened = opened;
+    this.xiaohongshu.core.onRecordingOpened = opened;
+    this.douyin.onAnchorReidentified = reidentified;
+  }
+
+  recordingForAnchor(key) { return this.platformForAnchor(key)?.recordingForAnchor?.(key); }
+
   get starting() { return this.bilibili.starting; }
   get pollBusy() { return this.bilibili.pollBusy || !!this.douyin.polling || !!this.xiaohongshu.polling; }
   get port() { return this.bilibili.port; }
