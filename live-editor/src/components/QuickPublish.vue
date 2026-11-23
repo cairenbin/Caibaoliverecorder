@@ -3,7 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { LoaderCircle } from 'lucide-vue-next';
 import { ui } from '../../shared/ui-copy.js';
 import { api } from '../api.js';
-import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationStatus, publicationTags, publicationValidation } from '../bilibili-publication.js';
+import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationStatus, publicationValidation } from '../bilibili-publication.js';
+import PublicationTags from './PublicationTags.vue';
 import PublicationCopyright from './PublicationCopyright.vue';
 import PublicationCategory from './PublicationCategory.vue';
 
@@ -19,7 +20,8 @@ const error = ref('');
 const accountError = ref('');
 const title = ref('');
 const description = ref('');
-const tagsText = ref('');
+const tags = ref([]);
+const tagInput = ref(null);
 const categoryId = ref('');
 const categoryValid = ref(false);
 const copyright = ref('');
@@ -37,7 +39,6 @@ const locked = computed(() => working.value || active.value || ['submitted', 'un
   || (publication.value?.status === 'failed' && !publication.value.canRetry));
 const variants = computed(() => publicationModes.filter(option => available.value.includes(option.id)));
 const accountLabel = computed(() => publicationAccountLabel(account.value));
-const tags = computed(() => publicationTags(tagsText.value));
 const validationError = computed(() => publicationValidation({
   title: title.value.trim(), tags: tags.value, copyright: copyright.value, source: source.value,
 }));
@@ -52,7 +53,7 @@ async function readDetails({ hydrate = false } = {}) {
   if (hydrate) {
     title.value = details.title || '';
     description.value = details.description || '';
-    tagsText.value = (details.tags || []).join('，');
+    tags.value = details.tags ?? [];
     categoryId.value = String(details.categoryId ?? '');
     copyright.value = details.copyright ? Number(details.copyright) : '';
     source.value = details.source || '';
@@ -82,6 +83,7 @@ async function pollStatus() {
 
 async function submit() {
   if (!canPublish.value) return;
+  if (!tagInput.value.commit()) return;
   working.value = true;
   emit('busy', true);
   error.value = '';
@@ -143,10 +145,7 @@ onBeforeUnmount(() => { request.abort(); clearTimeout(pollTimer); });
         {{ copy.简介 }}
         <textarea id="quick-publish-description" v-model="description" rows="2" maxlength="2000"/>
       </label>
-      <label class="field-label" for="quick-publish-tags">
-        {{ copy.标签 }}
-        <input id="quick-publish-tags" v-model="tagsText" maxlength="200" :placeholder="copy.标签分隔"/>
-      </label>
+      <PublicationTags ref="tagInput" v-model="tags" input-id="quick-publish-tags"/>
       <PublicationCategory v-model="categoryId" :account-uid="account?.uid && !accountError ? String(account.uid) : ''" @valid="categoryValid = $event"/>
       <PublicationCopyright v-model:copyright="copyright" v-model:source="source" field-prefix="quick-publish" required/>
       <fieldset class="quick-publish-versions">

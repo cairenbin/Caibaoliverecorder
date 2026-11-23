@@ -1,22 +1,21 @@
 import { renderAutoPostTitle } from '../shared/auto-post-title.js';
+import { normalizePublicationTags } from '../shared/publication-tags.js';
 import { publicationFiles } from './publication-files.js';
 
 const MODES = ['danmaku', 'clean', 'dual'];
 const anchorPattern = /^bilibili:(\d{1,20})$/;
 const settingsKey = id => `bilibili-auto-post:${id}`;
-const defaults = { enabled: false, titleTemplate: '', description: '', homepage: '', tags: [], categoryId: '', mode: 'danmaku', copyright: 2, source: '' };
+const defaults = { enabled: false, titleTemplate: '', description: '', homepage: '', tags: [], categoryId: '', mode: 'danmaku', copyright: '', source: '' };
 const unknownSubmission = '无法确认稿件是否已提交，请在 B站创作中心核对。';
 const publicationDescription = (description, homepage) => [description, homepage ? `主播主页：${homepage}` : ''].filter(Boolean).join('\n');
 const pausedBeforeSubmission = Symbol('paused before submission');
+const unfinishedSource = "EXISTS(SELECT 1 FROM sources WHERE session=s.id AND closed<>2)";
 
 function normalize(input) {
-  if (!input || typeof input.enabled !== 'boolean' || !MODES.includes(input.mode) ||
-    !Array.isArray(input.tags) || input.tags.length > 100 || input.tags.some(tag => typeof tag !== 'string')) {
+  if (!input || typeof input.enabled !== 'boolean' || !MODES.includes(input.mode)) {
     throw new Error('自动投稿设置无效。');
   }
-  const tags = [...new Set(input.tags.map(tag => tag.trim()).filter(Boolean))];
-  if (tags.join(',').length > 200) throw new Error('投稿标签内容过长。');
-  if (tags.length > 10 || (input.enabled && tags.length === 0)) throw new Error('请填写 1 至 10 个标签。');
+  const tags = normalizePublicationTags(input.tags, { required: input.enabled, legacy: !input.enabled });
   const text = (key, limit) => {
     if (typeof input[key] !== 'string' || input[key].length > limit) throw new Error('自动投稿设置超出长度限制。');
     return input[key].trim();
@@ -31,11 +30,11 @@ function normalize(input) {
   if (input.enabled && publicationDescription(description, homepage).length > 2000) throw new Error('简介与主播主页合计最多 2000 个字符。');
   const categoryId = String(input.categoryId ?? '');
   if ((categoryId || input.enabled) && !/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请选择 B站投稿分区。');
-  const copyright = Number(input.copyright ?? 2);
-  if (![1, 2].includes(copyright)) throw new Error('请选择自制或转载。');
+  const copyright = input.copyright === '' || input.copyright == null ? '' : Number(input.copyright);
+  if (![1, 2].includes(copyright) && (input.enabled || copyright !== '')) throw new Error('请选择自制或转载。');
   const source = input.source === undefined ? '' : text('source', 200);
-  if (input.enabled && copyright === 2 && !source) throw new Error('转载稿件请填写来源。');
-  return { enabled: input.enabled, titleTemplate, description, homepage, tags, categoryId, copyright, source, mode: input.mode };
+  if (input.enabled && copyright === 2 && (!source || /[\x00-\x1f\x7f]/.test(source))) throw new Error('转载稿件请填写有效来源。');
+  return { enabled: input.enabled, titleTemplate, description, homepage, tags, categoryId, copyright, source: copyright === 2 ? source : '', mode: input.mode };
 }
 
 export class AutoPost {
@@ -134,6 +133,11 @@ export class AutoPost {
     return !!this.store.get("SELECT 1 FROM auto_post_jobs WHERE export_job=? AND status IN ('submitting','uploading')", jobId);
   }
 
+  hasPendingExport() {
+    return !!this.store.get(`SELECT 1 FROM auto_post_jobs p JOIN sessions s ON s.id=p.session
+      WHERE s.deleted_at='' AND p.status IN ('queued','exporting') LIMIT 1`);
+  }
+
   authorizes(session, uid, taskId) {
     const job = this.store.get("SELECT room,config,result FROM auto_post_jobs WHERE session=? AND status='uploading'", session);
     if (!job || !this.store.session(session)) return false;
@@ -145,11 +149,22 @@ export class AutoPost {
   }
 
   snapshot() {
-    const jobs = this.store.all(`SELECT p.* FROM auto_post_jobs p JOIN sessions s ON s.id=p.session
+    const busy = this.busy();
+    const preparation = this.media.preparation;
+    const jobs = this.store.all(`SELECT p.*,s.status AS recording_status,${unfinishedSource} AS source_pending
+      FROM auto_post_jobs p JOIN sessions s ON s.id=p.session
       WHERE s.deleted_at='' ORDER BY s.created DESC LIMIT 200`).map(row => {
       const { title, mode, live } = JSON.parse(row.config);
       const result = row.result && JSON.parse(row.result);
-      return { id: row.session, session: row.session, title, mode, status: row.status, error: row.error,
+      let stage;
+      if (row.status === 'queued') {
+        if (row.recording_status !== 'finished' || row.source_pending) stage = 'waiting-source';
+        else if (busy) stage = 'waiting-idle';
+        else if (preparation?.automaticExportPriority === row.session) {
+          stage = preparation.active?.id === row.session ? 'preparing' : 'waiting-preparation';
+        }
+      }
+      return { id: row.session, session: row.session, title, mode, status: row.status, stage, error: row.error,
         parts: result?.parts?.map(part => ({ title: part.title })), progress: result?.progress,
         aid: result?.aid, bvid: result?.bvid, canRetry: live === true && row.status === 'failed' && !result?.taskId };
     });
@@ -164,10 +179,13 @@ export class AutoPost {
 
   async process() {
     await this.refreshUploads();
-    if (this.busy()) return;
-    const rows = this.store.all(`SELECT p.*,s.duration FROM auto_post_jobs p JOIN sessions s ON s.id=p.session
-      WHERE s.deleted_at='' AND s.status='finished' AND p.status IN ('queued','exporting','blocked')
-      AND NOT EXISTS(SELECT 1 FROM sources WHERE session=s.id AND closed<>2)
+    const preparation = this.media.preparation;
+    preparation?.prioritizeAutomaticExport();
+    const busy = this.busy();
+    const rows = this.store.all(`SELECT p.*,s.duration,s.status AS recording_status,${unfinishedSource} AS source_pending,
+      (SELECT error FROM sources WHERE session=s.id AND closed<>2 AND error<>'' LIMIT 1) AS source_error
+      FROM auto_post_jobs p JOIN sessions s ON s.id=p.session
+      WHERE s.deleted_at='' AND p.status IN ('queued','exporting','blocked')
       ORDER BY s.created ASC`);
     for (const row of rows) {
       const config = JSON.parse(row.config), current = this.store.setting(settingsKey(row.room));
@@ -176,6 +194,11 @@ export class AutoPost {
         this.status(row.session, 'cancelled');
         continue;
       }
+      if (row.source_error && ['finished', 'finishing'].includes(row.recording_status)) {
+        this.status(row.session, 'failed', row.source_error);
+        continue;
+      }
+      if (busy || row.recording_status !== 'finished' || row.source_pending || this.store.deletions?.has(row.session)) continue;
       if (!this.uid || this.uid !== config.uid || this.uid !== current.uid) {
         this.status(row.session, 'blocked', 'B站 Cookie 当前不可用或投稿账号已改变。');
         continue;
@@ -189,8 +212,13 @@ export class AutoPost {
         if (!row.duration || !config.title || config.title.length > 80) throw new Error('请检查录像时长和投稿标题。');
         const existing = this.store.get("SELECT * FROM jobs WHERE session=? AND json_valid(data) AND json_extract(data,'$.autoPost')=? ORDER BY rowid DESC LIMIT 1", row.session, row.session);
         if (!existing) {
+          if (preparation?.prioritizeAutomaticExport(row.session)) {
+            this.status(row.session, 'queued');
+            return;
+          }
           await this.media.enqueue(row.session, { scope: 'full', mode: config.mode }, { autoPost: row.session });
           this.status(row.session, 'exporting');
+          this.store.diagnostics?.record('自动投稿', `房间 ${row.room}：已加入导出队列。`);
           return;
         }
         if (existing.status === 'done') {
@@ -206,7 +234,10 @@ export class AutoPost {
           this.store.run(`UPDATE auto_post_jobs SET export_job=? WHERE session=?`, existing.id, row.session);
           this.status(row.session, 'blocked', '请在导出任务中继续处理。');
         }
-      } catch (error) { this.status(row.session, 'failed', error.message); }
+      } catch (error) {
+        this.status(row.session, 'failed', error.message);
+        this.store.diagnostics?.record('自动投稿', error, { level: '警告' });
+      }
     }
   }
 

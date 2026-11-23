@@ -1,4 +1,5 @@
 import { publicationFiles } from './publication-files.js';
+import { normalizePublicationTags } from '../shared/publication-tags.js';
 
 const unknownSubmission = '无法确认稿件是否已提交，请在 B站创作中心核对。';
 const duplicate = () => Object.assign(new Error('这次导出已有投稿任务。'), { status: 409 });
@@ -13,14 +14,7 @@ function normalize(input) {
   if (typeof input.description !== 'string' || input.description.length > 2000 || input.description.includes('\0')) {
     throw new Error('简介最多 2000 个字符。');
   }
-  if (!Array.isArray(input.tags) || input.tags.length > 100 || input.tags.some(tag => typeof tag !== 'string')) {
-    throw new Error('投稿标签无效。');
-  }
-  const tags = [...new Set(input.tags.map(tag => tag.trim()).filter(Boolean))];
-  if (!tags.length || tags.length > 10 || tags.some(tag => controlCharacters.test(tag) || /[,，]/.test(tag))) {
-    throw new Error('请填写 1 至 10 个有效的标签。');
-  }
-  if (tags.join(',').length > 200) throw new Error('标签合计最多 200 个字符。');
+  const tags = normalizePublicationTags(input.tags);
   const categoryId = String(input.categoryId ?? '');
   if (!/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请选择 B站投稿分区。');
   const copyright = Number(input.copyright);
@@ -111,7 +105,7 @@ export class QuickPublish {
     const defaultMode = availableModes.includes(job.row.mode) ? job.row.mode : availableModes[0];
     const title = String(session.title || '').replace(/[\x00-\x1f\x7f]+/g, ' ').trim()
       .slice(0, 80).replace(/[\uD800-\uDBFF]$/, '') || '直播选段';
-    const defaults = { title, description: '', tags: [], categoryId: '', copyright: 2, source: '' };
+    const defaults = { title, description: '', tags: [], categoryId: '', copyright: '', source: '' };
     const { accountUid, accountError } = this.publisher.snapshot();
     return { ...defaults, ...draft, availableModes, account: accountUid ? { uid: accountUid } : null, accountError,
       mode: availableModes.includes(draft?.mode) ? draft.mode : defaultMode, publication: publicJob(previous) };

@@ -87,7 +87,7 @@ async function createManagedApp(options,runtime) {
   const clients=new Set(); let closing=false,app,startupRecovery;
   store.recovery.recovering=true;
   const deletingSessions=new SessionDeletion({store,storage,waveform,media,density,idleMs:options.deletionIdleMs??30000,retryMs:options.deletionRetryMs??1000});
-  let autoUpdate;
+  let autoUpdate,autoPost;
   const liveOptions=options.preparationOptions?.liveOptions||{},liveResources=liveOptions.resources||liveSystemResources();
   const liveHealth=new LiveRecordingHealth({store,recorder,ingestor,media,resources:liveResources,
     blocked:()=>closing||store.recovery.recovering||autoUpdate?.applying||storage.busy||
@@ -113,7 +113,6 @@ async function createManagedApp(options,runtime) {
   const previewTimestamp=()=>store.setting('preview-timestamp')===true;
   const settingsSnapshot=()=>workbenchSettings(store,media,closeAction,previewTimestamp);
   function validateCloseAction(value){if(!['ask','exit','background'].includes(value))throw new Error('请选择有效的关闭窗口方式。');}
-  const activity=()=>appActivity({store,media,recorder,preparation,storage,ingestor,deletingSessions,publishing:publisher.hasWork()});
   const packageInfo=JSON.parse(await fs.readFile(path.join(appRoot,'package.json'),'utf8'));
   const current={version:packageInfo.version,revision:packageInfo.buildRevision??1};
   if(packageInfo.buildRevision!==undefined&&!current.version.includes('-beta.'))current.buildId=buildIdentity(current);
@@ -125,9 +124,13 @@ async function createManagedApp(options,runtime) {
   const deleteMaterial=(id,options)=>deletingSessions.delete(id,options);
   const deletionMaintenance=new DeletionMaintenance(store,{remove:deleteMaterial,busy:()=>closing||deletingSessions.size>0||ingestor.busy||storage.busy||waveform.active||!!preparation.active||media.previews.size>0||media.hasForegroundWork()||recorder.rooms.some(room=>room.recording)||!!store.get("SELECT id FROM sessions WHERE deleted_at='' AND status<>'finished' LIMIT 1")});
   autoUpdate=new AutoUpdate({updates,runtime,appRoot,projectRoot,activity,quit:()=>desktopExit.request(false)});
-  const autoPost=new AutoPost(store,credentials,media,()=>recorder.anchors,()=>closing||store.recovery.recovering||
+  autoPost=new AutoPost(store,credentials,media,()=>recorder.anchors,()=>closing||store.recovery.recovering||
     autoUpdate.applying||(!options.noRecorder&&recorder.connectionPending)||hasRecording(store,recorder)||
-    storage.busy||hasIndexing(store)||media.hasForegroundWork(),publisher);
+    storage.busy||hasIndexing(store)||media.hasForegroundWork({includeInteractive:false}),publisher);
+  function activity(){
+    return appActivity({store,media,recorder,preparation,storage,ingestor,deletingSessions,
+      publishing:publisher.hasWork(),pendingPublication:autoPost?.hasPendingExport()});
+  }
   const quickPublish=new QuickPublish(store,publisher);
   jobDeletion.isPublishing=id=>autoPost.isUploadingExport(id)||quickPublish.isBusy(id);
   recorder.bilibili.onRecordingOpened=session=>autoPost.capture(session);

@@ -18,7 +18,7 @@ const copy = ui.autoPost;
   </label>
   <label v-if="copyright === 2" class="field-label" :for="fieldPrefix + '-source'">
     {{ copy.转载来源 }}
-    <input :id="fieldPrefix + '-source'" v-model="source" maxlength="200" :disabled="disabled" :required="required"/>
+    <input :id="fieldPrefix + '-source'" v-model="source" maxlength="200" :placeholder="copy.转载来源提示" :disabled="disabled" :required="required"/>
   </label>
 </template>
 

@@ -4,7 +4,8 @@ import { LoaderCircle } from 'lucide-vue-next';
 import { ui } from '../../shared/ui-copy.js';
 import { POST_DATE_TOKEN, renderAutoPostTitle } from '../../shared/auto-post-title.js';
 import { api } from '../api.js';
-import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationTags, publicationValidation } from '../bilibili-publication.js';
+import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationValidation } from '../bilibili-publication.js';
+import PublicationTags from './PublicationTags.vue';
 import PublicationCopyright from './PublicationCopyright.vue';
 import PublicationCategory from './PublicationCategory.vue';
 
@@ -17,10 +18,11 @@ const enabled = ref(false);
 const titleTemplate = ref('');
 const description = ref('');
 const homepage = ref('');
-const tagsText = ref('');
+const tags = ref([]);
+const tagInput = ref(null);
 const categoryId = ref('');
 const categoryValid = ref(false);
-const copyright = ref(2);
+const copyright = ref('');
 const source = ref('');
 const mode = ref('danmaku');
 const account = ref(null);
@@ -33,7 +35,6 @@ const saving = ref(false);
 const error = ref('');
 const request = new AbortController();
 const preview = computed(() => renderAutoPostTitle(titleTemplate.value, today));
-const tags = computed(() => publicationTags(tagsText.value));
 const accountLabel = computed(() => publicationAccountLabel(account.value));
 const validationError = computed(() => {
   const profile = homepage.value.trim();
@@ -56,10 +57,10 @@ onMounted(async () => {
     titleTemplate.value = settings.titleTemplate || '';
     description.value = settings.description || '';
     homepage.value = settings.homepage || '';
-    tagsText.value = (settings.tags ?? []).join('，');
+    tags.value = settings.tags ?? [];
     categoryId.value = String(settings.categoryId ?? '');
     mode.value = publicationModes.some(option => option.id === settings.mode) ? settings.mode : 'danmaku';
-    copyright.value = Number(settings.copyright) === 1 ? 1 : 2;
+    copyright.value = [1, 2].includes(Number(settings.copyright)) ? Number(settings.copyright) : '';
     source.value = settings.source || '';
     account.value = settings.account || null;
     accountError.value = settings.accountError || '';
@@ -90,6 +91,7 @@ async function insertDate() {
 
 async function save() {
   if (!loaded.value || !valid.value || saving.value) return;
+  if (enabled.value && !tagInput.value.commit()) return;
   saving.value = true;
   emit('busy', true);
   error.value = '';
@@ -152,10 +154,7 @@ async function save() {
         <input id="auto-post-homepage" v-model="homepage" type="url" maxlength="500" :disabled="saving"/>
         <small>{{ copy.主播主页说明 }}</small>
       </label>
-      <label class="field-label" for="auto-post-tags">
-        {{ copy.标签 }}
-        <input id="auto-post-tags" v-model="tagsText" maxlength="200" :disabled="saving" :placeholder="copy.标签分隔"/>
-      </label>
+      <PublicationTags ref="tagInput" v-model="tags" input-id="auto-post-tags" :disabled="saving"/>
       <PublicationCategory v-model="categoryId" :account-uid="canUseAccount ? String(account.uid) : ''" :disabled="saving" @valid="categoryValid = $event"/>
       <PublicationCopyright v-model:copyright="copyright" v-model:source="source" field-prefix="auto-post" :required="enabled" :disabled="saving"/>
     </div>

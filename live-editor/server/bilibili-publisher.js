@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { Agent } from 'node:https';
 import path from 'node:path';
 import { checkedFile, fingerprint, inside, pathKey } from './storage-files.js';
+import { normalizePublicationTags } from '../shared/publication-tags.js';
 
 function uploadConfig(input) {
   const title = typeof input?.title === 'string' ? input.title.trim() : '';
@@ -12,10 +13,8 @@ function uploadConfig(input) {
   if (typeof input.desc !== 'string' || input.desc.length > 2000 || input.desc.includes('\0')) {
     throw new Error('投稿简介最多 2000 个字符。');
   }
-  if (!Array.isArray(input.tag) || input.tag.length < 1 || input.tag.length > 10 || input.tag.some(tag =>
-    typeof tag !== 'string' || !tag.trim() || /[,，\x00-\x1f\x7f]/.test(tag)) || input.tag.join(',').length > 200) {
-    throw new Error('请填写 1 至 10 个有效的投稿标签。');
-  }
+  // An automatic task may contain tags saved before the per-tag limit was added.
+  const tags = normalizePublicationTags(input.tag, { legacy: true });
   if (!Number.isSafeInteger(input.tid) || input.tid <= 0 || input.tid > 999999999) {
     throw new Error('请填写有效的 B站投稿分区。');
   }
@@ -28,7 +27,7 @@ function uploadConfig(input) {
     if (flag !== undefined && flag !== 0 && flag !== 1) throw new Error('投稿音频选项无效。');
   }
   return {
-    title, desc: input.desc, tag: input.tag.map(tag => tag.trim()).join(','), tid: input.tid,
+    title, desc: input.desc, tag: tags.join(','), tid: input.tid,
     copyright: input.copyright, ...(input.copyright === 2 ? { source } : {}),
     dolby: input.dolby ?? 0, lossless_music: input.hires ?? 0,
   };

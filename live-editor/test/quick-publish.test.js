@@ -126,17 +126,22 @@ test('并发发布和手动删除竞争时不会误发，提交结果不明时�
 
 test('快速发布校验 B站标签和转载来源长度，提交时允许上限值', async t => {
   const { service, calls } = await setup(t);
-  await assert.rejects(service.submit(exportJobId, { ...form, tags: [' '] }), /1 至 10/);
+  assert.equal((await service.details(exportJobId)).copyright, '');
+  await assert.rejects(service.submit(exportJobId, { ...form, copyright: '' }), /自制或转载/);
+  await assert.rejects(service.submit(exportJobId, { ...form, tags: [' '] }), /至少填写一个/);
   const tooManyTags = Array.from({ length: 11 }, (_, index) => `标签${index}`);
-  await assert.rejects(service.submit(exportJobId, { ...form, tags: tooManyTags }), /1 至 10/);
-  await assert.rejects(service.submit(exportJobId, { ...form, tags: ['a'.repeat(201)] }), /200 个字符/);
+  await assert.rejects(service.submit(exportJobId, { ...form, tags: tooManyTags }), /最多使用 10/);
+  await assert.rejects(service.submit(exportJobId, { ...form, tags: ['a'.repeat(21)] }), /20 个字符/);
+  await assert.rejects(service.submit(exportJobId, { ...form, tags: ['甲,乙'] }), /英文逗号/);
+  await assert.rejects(service.submit(exportJobId, { ...form, source: '' }), /来源/);
   await assert.rejects(service.submit(exportJobId, { ...form, source: 'x'.repeat(201) }), /200 个字符/);
   assert.equal(calls.length, 0);
   const source = 'x'.repeat(200);
-  const { publication } = await service.submit(exportJobId, { ...form, source, tags: tooManyTags.slice(1) });
+  const tags = ['甲，乙', '字'.repeat(20), ...tooManyTags.slice(3)];
+  const { publication } = await service.submit(exportJobId, { ...form, source, tags });
   assert.equal(publication.status, 'uploading');
   assert.equal(calls[0].config.source, source);
-  assert.equal(calls[0].config.tag.length, 10);
+  assert.deepEqual(calls[0].config.tag, tags);
 });
 
 test('只有明确未提交稿件的失败可重新提交', async t => {

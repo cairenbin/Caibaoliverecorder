@@ -981,7 +981,7 @@ onBeforeUnmount(()=>{window.removeEventListener('pointerdown',interactivePriorit
           <div v-for="posting in autoPostJobs" :key="posting.id" class="job-row" :data-auto-post-status="posting.status">
             <div>
               <strong>{{ posting.title }}</strong>
-              <small role="status">{{ publicationStatus(posting.status) }}</small>
+              <small role="status">{{ publicationStatus(posting.stage || posting.status) }}</small>
             </div>
             <p v-if="posting.mode==='dual'" class="job-save-hint">
               {{ posting.parts?.length ? posting.parts.map((part,index)=>ui.autoPost.分P标题(index+1,part.title)).join(' · ') : ui.autoPost.分P预览 }}

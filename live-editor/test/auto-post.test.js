@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { AutoPost } from '../server/auto-post.js';
+import { BackgroundPreparation } from '../server/background-preparation.js';
 import { clipFile } from '../server/output-names.js';
 import { Store } from '../server/store.js';
 
@@ -15,7 +16,11 @@ const settings = { enabled: true, titleTemplate: '直播回放｜{录制日期}'
 async function setup(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'caibo-auto-post-'));
   const store = new Store(root);
-  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
+  t.after(async () => {
+    await media.preparation?.close();
+    store.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
   const credentials = {
     cookie: '', configured: false,
     snapshot() { return { platforms: { bilibili: { configured: this.configured } } }; },
@@ -39,7 +44,7 @@ async function setup(t) {
     async task(task) { assert.equal(task, 'fixture-task'); return { status: 'submitted', bvid: 'BVtest001' }; },
   };
   const service = () => new AutoPost(store, credentials, media, () => [{ key }], () => false, publisher);
-  return { root, store, credentials, history, submitted, publisher, service };
+  return { root, store, credentials, history, submitted, publisher, media, service };
 }
 
 test('只在已有 B站 Cookie 的 B站主播上开启，旧素材不加入自动投稿', async t => {
@@ -55,6 +60,8 @@ test('只在已有 B站 Cookie 的 B站主播上开启，旧素材不加入自�
   await assert.rejects(() => autoPost.settings(key, { ...settings, accountUid: '456' }), /账号已改变/);
   await assert.rejects(() => autoPost.settings('douyin:123', settings), /B站监控主播/);
   assert.equal((await autoPost.settings(key)).enabled, false);
+  assert.equal((await autoPost.settings(key)).copyright, '');
+  await assert.rejects(autoPost.settings(key, { ...settings, copyright: '' }), /自制或转载/);
   const earlier = store.createSession({ room: 123, created: '2000-01-01T12:00:00Z' });
   await autoPost.settings(key, settings);
   autoPost.capture(earlier);
@@ -109,6 +116,48 @@ test('封口后只建一个导出任务，恢复后继续同一任务并按指�
   assert.equal(submitted[0].config.desc, '示例简介\n主播主页：https://space.bilibili.com/123');
   assert.deepEqual(submitted[0].parts.map(part => part.title), ['弹幕版', '纯净版']);
   assert.equal(history.length, 1);
+});
+
+test('自动投稿优先预处理同一素材并在完成后只创建一次导出', async t => {
+  const { root, store, credentials, media, history, service } = await setup(t);
+  credentials.configured = true;
+  credentials.cookie = 'SESSDATA=synthetic; DedeUserID=123; bili_jct=mock-csrf';
+  const preparation = media.preparation = new BackgroundPreparation(store, media, { idleGraceMs: 0 });
+  t.mock.method(preparation, 'wake', () => {});
+  preparation.start();
+  const prepared = [];
+  media.prepareNext = async id => {
+    prepared.push(id);
+    return { done: true, preparedSeconds: 3, totalSeconds: 3, bytes: 0 };
+  };
+  function finished(name, created) {
+    const session = store.createSession({ room: 123, status: 'finished', created });
+    const source = store.addSource(session.id, path.join(root, name + '.flv'), 0, created, true);
+    store.run('UPDATE sessions SET duration=3 WHERE id=?', session.id);
+    store.run('UPDATE sources SET closed=2 WHERE id=?', source.id);
+    preparation.enqueue(session.id);
+    return session;
+  }
+  const other = finished('unrelated', '2000-01-01T00:00:00Z');
+  store.run('UPDATE preparation_jobs SET prepared_seconds=2 WHERE session=?', other.id);
+  const autoPost = service();
+  await autoPost.settings(key, settings);
+  const session = finished('auto', new Date(Date.now() + 1000).toISOString());
+  autoPost.capture(session);
+  await autoPost.tick();
+  assert.equal(autoPost.snapshot().jobs[0].stage, 'waiting-preparation');
+  assert.deepEqual(history, []);
+  await preparation.tick();
+  assert.deepEqual(prepared, [session.id]);
+  await autoPost.tick();
+  await autoPost.tick();
+  assert.deepEqual(history, [{ id: session.id, scope: 'full', mode: 'dual' }]);
+
+  const failed = finished('failed', new Date(Date.now() + 2000).toISOString());
+  autoPost.capture(failed);
+  store.run("UPDATE preparation_jobs SET status='error' WHERE session=?", failed.id);
+  await autoPost.tick();
+  assert.equal(history.at(-1).id, failed.id);
 });
 
 test('录制中开启自动投稿可登记当前场，只在手动停止并完成文件收尾后导出', async t => {

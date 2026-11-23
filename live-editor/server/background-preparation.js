@@ -93,6 +93,22 @@ export class BackgroundPreparation {
     return '';
   }
   row(id) { return this.store.get('SELECT * FROM preparation_jobs WHERE session=?', id); }
+  prioritizeAutomaticExport(id = null) {
+    if (!id) {
+      this.automaticExportPriority = null;
+      return false;
+    }
+    if (!this.started || !this.enabled || !this.available(id)) return false;
+    const sources = this.store.sources(id);
+    if (!sources.length || sources.some(source => source.error)) return false;
+    if (!this.row(id)) this.enqueue(id);
+    const row = this.row(id);
+    if (!row || row.paused || !['queued', 'waiting', 'preparing'].includes(row.status) ||
+      (row.next_retry > this.now() && row.live_next_source_seconds === null)) return false;
+    this.automaticExportPriority = id;
+    this.wake();
+    return true;
+  }
   reconcileExports() { return this.reconciliation.tick(); }
   available(id) { return !this.closed && !this.blocked.has(id) && !this.changing.has(id) && !this.store.deletions?.has(id) && !!this.store.session(id); }
   waitRows(reason, preserveActive = false) {
@@ -137,7 +153,10 @@ export class BackgroundPreparation {
     // preference survives restarts and avoids alternating large plans evicting
     // each other's blocks under the shared cache budget. Paused/backoff rows
     // remain excluded, so they never prevent other materials from progressing.
-    const candidates = this.store.all("SELECT * FROM preparation_jobs WHERE paused=0 AND status IN ('queued','waiting') AND (next_retry<=? OR live_next_source_seconds IS NOT NULL) ORDER BY prepared_seconds DESC,updated,session", now);
+    const candidates = this.store.all(`SELECT * FROM preparation_jobs WHERE paused=0 AND status IN ('queued','waiting')
+      AND (next_retry<=? OR live_next_source_seconds IS NOT NULL)
+      ORDER BY CASE WHEN session=? THEN 0 ELSE 1 END,prepared_seconds DESC,updated,session`,
+    now, this.automaticExportPriority ?? '');
     for (const row of candidates) {
       if (!this.available(row.session)) continue;
       const session = this.store.session(row.session), sources = this.store.sources(row.session);
