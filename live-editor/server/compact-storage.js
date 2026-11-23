@@ -28,13 +28,17 @@ export class CompactStorage {
   async cooperate(source){this.assertActive(source);await immediate();while(this.isBusy()){this.assertActive(source);await pause(50);}this.assertActive(source);}
   async tick() {
     if(this.closed||this.busy||this.isBusy())return;
-    this.busy=true;this.task=this.runTick();
+    const candidates=this.store.all("SELECT sources.*,source_storage.mode AS storage_mode FROM sources JOIN sessions ON sessions.id=sources.session JOIN source_storage ON source_storage.source=sources.id WHERE source_storage.eligible=1 AND sources.closed=2 AND sources.error='' AND sessions.status='finished' AND sessions.deleted_at='' AND source_storage.status IN ('new','pending') AND source_storage.next_retry<=? ORDER BY CASE WHEN source_storage.mode='direct' THEN 0 ELSE 1 END,sessions.created,sources.start",this.now());
+    const source=candidates.find(row=>!this.blocked.has(row.session)&&!this.store.deletions?.has(row.session)&&(row.storage_mode!=='direct'||!chunkReaderCount(this.store,row.id)));
+    if(!source)return;
+    // Only a selected source blocks automatic export in this maintenance pass.
+    this.busy=true;
+    this.currentSession=source.session;
+    this.referenceCache=null;
+    this.task=this.runTick(source);
     try{return await this.task;}finally{this.busy=false;this.currentSession=null;this.task=null;}
   }
-  async runTick() {
-    const candidates=this.store.all("SELECT sources.*,source_storage.mode AS storage_mode FROM sources JOIN sessions ON sessions.id=sources.session JOIN source_storage ON source_storage.source=sources.id WHERE source_storage.eligible=1 AND sources.closed=2 AND sources.error='' AND sessions.status='finished' AND sessions.deleted_at='' AND source_storage.status IN ('new','pending') AND source_storage.next_retry<=? ORDER BY CASE WHEN source_storage.mode='direct' THEN 0 ELSE 1 END,sessions.created,sources.start",this.now());
-    const source=candidates.find(row=>!this.blocked.has(row.session)&&!this.store.deletions?.has(row.session)&&(row.storage_mode!=='direct'||!chunkReaderCount(this.store,row.id)));if(!source)return;
-    this.currentSession=source.session;this.referenceCache=null;
+  async runTick(source) {
     try {
       if(source.storage_mode!=='direct')await this.verifyAndCommit(source);
       return await this.cleanup(source);

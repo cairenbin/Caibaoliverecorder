@@ -129,7 +129,10 @@ test('close取消扫描释放句柄，录制忙时不启动新扫描，显式del
   let busy=true;const t=await setup('cancel',{options:{isBusy:()=>busy}});assert.equal(await t.storage.tick(),undefined);assert.equal(state(t.store,t.source.id).mode,'chunks');busy=false;
   let entered,release;const checkpoint=new Promise(resolve=>{entered=resolve;}),original=t.storage.cooperate.bind(t.storage);let first=true;
   t.storage.cooperate=async source=>{if(first){first=false;entered();await new Promise(resolve=>{release=resolve;});}await original(source);};
-  const tick=t.storage.tick();await checkpoint;await assert.rejects(t.store.deleteSession(t.session.id,true),/整理/);const closing=t.storage.close();release();await tick;await closing;
+  const tick=t.storage.tick();await checkpoint;
+  assert.equal(t.storage.busy,true);assert.equal(t.storage.currentSession,t.session.id);
+  await assert.rejects(t.store.deleteSession(t.session.id,true),/整理/);const closing=t.storage.close();release();await tick;await closing;
+  assert.equal(t.storage.busy,false);
   assert.equal(state(t.store,t.source.id).mode,'chunks');for(const chunk of t.chunks)await fs.access(chunk.path);await fs.rename(t.file,t.file+'.unlocked');t.store.close();
 });
 

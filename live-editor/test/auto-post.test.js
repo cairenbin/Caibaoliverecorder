@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { AutoPost } from '../server/auto-post.js';
 import { BackgroundPreparation } from '../server/background-preparation.js';
+import { CompactStorage } from '../server/compact-storage.js';
 import { clipFile } from '../server/output-names.js';
 import { Store } from '../server/store.js';
 
@@ -43,7 +44,7 @@ async function setup(t) {
     async submit(input) { submitted.push(input); return { taskId: 'fixture-task' }; },
     async task(task) { assert.equal(task, 'fixture-task'); return { status: 'submitted', bvid: 'BVtest001' }; },
   };
-  const service = () => new AutoPost(store, credentials, media, () => [{ key }], () => false, publisher);
+  const service = (busy = () => false) => new AutoPost(store, credentials, media, () => [{ key }], busy, publisher);
   return { root, store, credentials, history, submitted, publisher, media, service };
 }
 
@@ -191,6 +192,29 @@ test('录制中开启自动投稿可登记当前场，只在手动停止并完�
   await autoPost.tick();
   await autoPost.tick();
   assert.deepEqual(history, [{ id: current.id, scope: 'full', mode: 'dual' }]);
+});
+
+test('素材整理的空轮询不会阻止同一轮自动导出', async t => {
+  const { root, store, credentials, service, history } = await setup(t);
+  credentials.configured = true;
+  credentials.cookie = 'SESSDATA=synthetic; DedeUserID=123; bili_jct=mock-csrf';
+  const storage = new CompactStorage(store);
+  const autoPost = service(() => storage.busy);
+  await autoPost.settings(key, settings);
+  const created = new Date(Date.now() + 1000).toISOString();
+  const session = store.createSession({ room: 123, status: 'finished', created });
+  const source = store.addSource(session.id, path.join(root, 'sealed.flv'), 0, created, true);
+  store.run('UPDATE sessions SET duration=3 WHERE id=?', session.id);
+  store.run('UPDATE sources SET closed=2 WHERE id=?', source.id);
+  store.run("INSERT INTO source_storage(source,eligible,mode,status) VALUES(?,1,'direct','done')", source.id);
+  autoPost.capture(session);
+
+  // The production timer launches both operations without awaiting either.
+  const posting = autoPost.tick();
+  const compaction = storage.tick();
+  await Promise.all([posting, compaction]);
+  assert.deepEqual(history, [{ id: session.id, scope: 'full', mode: 'dual' }]);
+  assert.equal(autoPost.snapshot().jobs[0].status, 'exporting');
 });
 
 
