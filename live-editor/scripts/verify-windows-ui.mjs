@@ -30,9 +30,10 @@ async function verifyAutoPostMenu(page){
  const account={uid:'1003',name:'投稿测试账号'};
  const anchors=[
   {key:'bilibili:1001',platform:'bilibili',roomId:'1001',name:'投稿测试主播',enabled:true},
-  {key:'douyin:1002',platform:'douyin',roomId:'1002',name:'抖音测试主播',enabled:true}
+  {key:'douyin-user:1002',platform:'douyin',uid:'1002',ownWebRid:'1002',name:'抖音测试主播',enabled:true},
+  {key:'xiaohongshu-user:abcdef0123456789abcdef01',platform:'xiaohongshu',uid:'abcdef0123456789abcdef01',name:'小红书测试主播',enabled:true}
  ];
- const snapshot=()=>({...base,anchors,recorder:{...base.recorder,biliOnline:true,douyinOnline:true},
+ const snapshot=()=>({...base,anchors,recorder:{...base.recorder,biliOnline:true,douyinOnline:true,xiaohongshuOnline:true},
   autoPost:{...base.autoPost,cookieConfigured},bilibiliPublisher:{...base.bilibiliPublisher,configured:cookieConfigured,cookieConfigured,accountUid:cookieConfigured?account.uid:''}});
  await page.route('**/api/state',route=>route.fulfill({json:snapshot()}));
  await page.route('**/api/events',route=>route.fulfill({contentType:'text/event-stream',body:`data: ${JSON.stringify(snapshot())}\n\n`}));
@@ -47,15 +48,30 @@ async function verifyAutoPostMenu(page){
  }}));
  const settings=page.getByRole('menuitem',{name:'自动投稿设置',exact:true});
  const remove=page.getByRole('menuitem',{name:'移除监控',exact:true});
- for(const [configured,name,showSettings] of [
-  [false,'投稿测试主播',false], [true,'抖音测试主播',false], [true,'投稿测试主播',true]
- ]){
+ const openMenu=name=>page.locator('.monitored-anchor').filter({hasText:name}).click({button:'right',timeout:10000});
+ const dialog=page.getByRole('dialog',{name:'自动投稿设置',exact:true});
+ for(const configured of [false,true]){
   cookieConfigured=configured;
   await page.reload();
-  await page.locator('.monitored-anchor').filter({hasText:name}).click({button:'right',timeout:10000});
-  await remove.waitFor({state:'visible',timeout:5000});
-  assert.equal(await settings.isVisible(),showSettings);
+  for(const {name} of anchors){
+   await openMenu(name);
+   await remove.waitFor({state:'visible',timeout:5000});
+   assert.equal(await settings.isVisible(),configured,name);
+   if(configured){
+    await settings.click();
+    await dialog.getByText(name,{exact:true}).waitFor({state:'visible',timeout:5000});
+    await dialog.getByText(/投稿测试账号.*1003/).waitFor({state:'visible',timeout:5000});
+    assert.equal(await dialog.getByText(/录像来源/).count(),0);
+    assert.equal(await dialog.getByText('投稿到 B站',{exact:true}).count(),0);
+    await dialog.getByRole('button',{name:'关闭窗口',exact:true}).click();
+    await dialog.waitFor({state:'hidden',timeout:5000});
+   }else{
+    await page.keyboard.press('Escape');
+    await remove.waitFor({state:'hidden',timeout:5000});
+   }
+  }
  }
+ await openMenu(anchors[0].name);
  await settings.click();
  const form=page.locator('.auto-post-settings');
  await form.getByText(/投稿测试账号.*1003/).waitFor({state:'visible',timeout:5000});
