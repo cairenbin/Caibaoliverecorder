@@ -114,7 +114,7 @@ test('封口后只建一个导出任务，恢复后继续同一任务并按指�
   assert.deepEqual(JSON.parse(result).parts.map(part => part.path), [danmaku, clean]);
   assert.equal(JSON.parse(result).taskId, 'fixture-task');
   assert.equal(submitted.length, 1);
-  assert.equal(submitted[0].config.desc, '示例简介\n主播主页：https://space.bilibili.com/123');
+  assert.equal(submitted[0].config.desc, '示例简介\n主页链接：https://space.bilibili.com/123');
   assert.deepEqual(submitted[0].parts.map(part => part.title), ['弹幕版', '纯净版']);
   assert.equal(history.length, 1);
 });
@@ -245,7 +245,7 @@ test('上传工具响应丢失时保留待核对状态，重启或重试不会�
   credentials.configured = true;
   credentials.cookie = 'SESSDATA=synthetic; DedeUserID=123; bili_jct=mock-csrf';
   const autoPost = service();
-  await autoPost.settings(key, settings);
+  await autoPost.settings(key, { ...settings, homepage: '  ' });
   const session = store.createSession({ room: 123, status: 'finished', created: new Date(Date.now() + 1000).toISOString() });
   const source = store.addSource(session.id, path.join(root, 'original.flv'), 0, session.created, true);
   store.run('UPDATE sessions SET duration=3 WHERE id=?', session.id);
@@ -259,8 +259,10 @@ test('上传工具响应丢失时保留待核对状态，重启或重试不会�
   store.run("UPDATE jobs SET status='done',file=?,data=json_set(data,'$.output',json(?)) WHERE session=?",
     clean, JSON.stringify({ danmakuFile: danmaku }), session.id);
   let attempts = 0;
-  publisher.submit = async () => {
+  let description;
+  publisher.submit = async ({ config }) => {
     attempts++;
+    description = config.desc;
     throw Object.assign(new Error('response lost'), { submissionUncertain: true });
   };
   await autoPost.tick();
@@ -269,6 +271,7 @@ test('上传工具响应丢失时保留待核对状态，重启或重试不会�
   assert.equal(recovered.snapshot().jobs[0].status, 'uncertain');
   assert.throws(() => recovered.retry(session.id), /核对/);
   assert.equal(attempts, 1);
+  assert.equal(description, settings.description);
 });
 
 test('关闭再开启不会补投已取消的成片，显式重开可登记正在录的场次', async t => {

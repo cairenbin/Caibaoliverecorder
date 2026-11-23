@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { LoaderCircle } from 'lucide-vue-next';
 import { ui } from '../../shared/ui-copy.js';
-import { POST_DATE_TOKEN, renderAutoPostTitle } from '../../shared/auto-post-title.js';
+import { POST_DATE_TOKEN, renderAutoPostDescription, renderAutoPostTitle } from '../../shared/auto-post-template.js';
 import { api } from '../api.js';
 import { preventImplicitPublication, publicationAccountLabel, publicationModes, publicationValidation } from '../bilibili-publication.js';
 import PublicationTags from './PublicationTags.vue';
@@ -37,8 +37,7 @@ const request = new AbortController();
 const preview = computed(() => renderAutoPostTitle(titleTemplate.value, today));
 const accountLabel = computed(() => publicationAccountLabel(account.value));
 const validationError = computed(() => {
-  const profile = homepage.value.trim();
-  const intro = [description.value.trim(), profile ? `${copy.主播主页}：${profile}` : ''].filter(Boolean).join('\n');
+  const intro = renderAutoPostDescription(description.value, homepage.value);
   if (enabled.value && intro.length > 2000) return copy.简介与主页过长;
   return publicationValidation({
     title: preview.value, tags: tags.value, copyright: copyright.value, source: source.value,

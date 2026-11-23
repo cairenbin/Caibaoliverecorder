@@ -1,4 +1,4 @@
-import { renderAutoPostTitle } from '../shared/auto-post-title.js';
+import { renderAutoPostDescription, renderAutoPostTitle } from '../shared/auto-post-template.js';
 import { normalizePublicationTags } from '../shared/publication-tags.js';
 import { publicationFiles } from './publication-files.js';
 
@@ -7,7 +7,6 @@ const anchorPattern = /^bilibili:(\d{1,20})$/;
 const settingsKey = id => `bilibili-auto-post:${id}`;
 const defaults = { enabled: false, titleTemplate: '', description: '', homepage: '', tags: [], categoryId: '', mode: 'danmaku', copyright: '', source: '' };
 const unknownSubmission = '无法确认稿件是否已提交，请在 B站创作中心核对。';
-const publicationDescription = (description, homepage) => [description, homepage ? `主播主页：${homepage}` : ''].filter(Boolean).join('\n');
 const pausedBeforeSubmission = Symbol('paused before submission');
 const unfinishedSource = "EXISTS(SELECT 1 FROM sources WHERE session=s.id AND closed<>2)";
 
@@ -27,7 +26,7 @@ function normalize(input) {
     const url = URL.parse(homepage);
     if (url?.protocol !== 'https:' || url.hostname !== 'space.bilibili.com' || url.username || url.password || url.port) throw new Error('请填写 B站主播主页链接。');
   }
-  if (input.enabled && publicationDescription(description, homepage).length > 2000) throw new Error('简介与主播主页合计最多 2000 个字符。');
+  if (input.enabled && renderAutoPostDescription(description, homepage).length > 2000) throw new Error('简介与主播主页合计最多 2000 个字符。');
   const categoryId = String(input.categoryId ?? '');
   if ((categoryId || input.enabled) && !/^[1-9]\d{0,8}$/.test(categoryId)) throw new Error('请选择 B站投稿分区。');
   const copyright = input.copyright === '' || input.copyright == null ? '' : Number(input.copyright);
@@ -256,7 +255,7 @@ export class AutoPost {
     const result = { parts: parts.map(({ title, path }) => ({ title, path })) };
     const uploaderConfig = {
       title: config.title,
-      desc: publicationDescription(config.description, config.homepage),
+      desc: renderAutoPostDescription(config.description, config.homepage),
       tag: config.tags, tid: Number(config.categoryId), copyright: config.copyright,
       ...(config.copyright === 2 ? { source: config.source } : {}), dolby: 0, hires: 0,
     };
