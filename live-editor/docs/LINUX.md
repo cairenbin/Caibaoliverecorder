@@ -33,6 +33,6 @@ Linux 版本通过浏览器提供工作台。平台 Cookie 的系统级安全保
 
 ### 手动发布批处理
 
-把仓库中的 Linux 打包脚本和 `.github/workflows/linux-release.yml` 提交到 fork 的默认分支。打开 fork 的 **Actions → Linux release batch → Run workflow**。标签留空时选择上游最新稳定标签，也可填入 `v0.4.7` 这类稳定标签。任务会跳过已经公开发布的版本。GitHub runner 负责构建和上传，发布使用工作流的 `GITHUB_TOKEN`。
+把仓库中的 Linux 打包脚本和 `.github/workflows/linux-release.yml` 提交到 fork 的默认分支。打开 fork 的 **Actions → Linux release batch → Run workflow**。标签留空时选择上游最新稳定标签，也可填入 `v0.4.7` 这类稳定标签。发布任务会跳过已经公开发布的版本。取消勾选 `publish` 可只构建和验证，产物保存在该次 Actions 运行的 Artifacts 中。GitHub runner 负责构建和上传，发布使用工作流的 `GITHUB_TOKEN`。
 
 也可以在本机手动运行 `./live-editor/scripts/follow-upstream-linux.sh --publish v0.4.7`。省略标签时使用上游最新稳定标签。
