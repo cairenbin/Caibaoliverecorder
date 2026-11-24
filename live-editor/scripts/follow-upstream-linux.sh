@@ -26,9 +26,10 @@ trap cleanup EXIT
 
 git ls-remote --refs "$upstream" 'refs/heads/*' 'refs/tags/v*' |
   LC_ALL=C sort -k2 > "$work/refs"
+awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/' "$work/refs" |
+  sort -k2,2V > "$work/stable"
 if ! read -r object ref < <(
-  awk -v tag="$requested_tag" '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ && (tag == "" || $2 == "refs/tags/" tag)' "$work/refs" |
-    sort -k2,2V | tail -n 1
+  awk -v tag="$requested_tag" 'tag == "" || $2 == "refs/tags/" tag' "$work/stable" | tail -n 1
 ); then
   echo "上游没有可用的稳定版本标签：${requested_tag:-latest}" >&2
   exit 1
@@ -62,6 +63,7 @@ if [[ ! -d "$release" ]]; then
     exit 1
   }
 
+  cp "$root/LINUX-NOTICE.md" "$candidate/"
   cp -R "$root/live-editor/desktop-linux" "$candidate/live-editor/"
   cp "$root/live-editor/scripts/build-linux.sh" "$candidate/live-editor/scripts/"
   cp "$root/live-editor/docs/LINUX.md" "$candidate/live-editor/docs/"
@@ -70,7 +72,7 @@ if [[ ! -d "$release" ]]; then
     git -C "$candidate" apply "$directory_patch"
   fi
   mkdir -p "$candidate/.tools/linux" "$root/.tools/linux"
-  for tool in appimagetool-x86_64.AppImage runtime-20251108-x86_64; do
+  for tool in appimagetool-x86_64.AppImage runtime-20251108-x86_64 nfpm_2.48.0_amd64.deb; do
     if [[ -f "$root/.tools/linux/$tool" ]]; then
       cp -p "$root/.tools/linux/$tool" "$candidate/.tools/linux/"
     fi
@@ -80,7 +82,7 @@ if [[ ! -d "$release" ]]; then
   # Include the exact application source and the Linux overlay in the release.
   mkdir "$work/overlay"
   git -C "$candidate" archive --format=tar "$commit" | tar -C "$work/overlay" -xf -
-  tar -C "$candidate" -cf - live-editor/desktop-linux live-editor/scripts/build-linux.sh \
+  tar -C "$candidate" -cf - LINUX-NOTICE.md live-editor/desktop-linux live-editor/scripts/build-linux.sh \
     live-editor/docs/LINUX.md live-editor/server/directories.js | tar -C "$work/overlay" -xf -
   tar -C "$work/overlay" -czf "$staging/Caibo-$tag-linux-source.tar.gz" .
   printf '%s\t%s\t%s\n' "$tag" "$object" "$commit" > "$staging/upstream.tsv"
@@ -94,12 +96,17 @@ if [[ ! -d "$release" ]]; then
       while IFS=$'\t' read -r name version; do
         printf '%s %s https://launchpad.net/ubuntu/+source/%s/%s\n' "$name" "$version" "$name" "${version//:/%3A}"
       done
+    printf '\nRPM FFmpeg and bundled library sources\n\n'
+    printf 'Binary\tVersion\tSource package\tCopyright notice\tVendor\tSource URL\n'
+    cat "$staging/rpm-media-sources.tsv"
     printf '\nNode.js source: https://nodejs.org/dist/v24.12.0/node-v24.12.0.tar.xz\n'
     printf 'AppImage runtime source: https://github.com/AppImage/type2-runtime/tree/20251108\n'
     printf 'Application source: Caibo-%s-linux-source.tar.gz\n' "$tag"
     printf 'Git history for GitVersion: https://github.com/kk12091209/Caibaoliverecorder/commit/%s\n' "$commit"
   } > "$staging/SOURCES.txt"
-  (cd "$staging" && sha256sum -- ./*.deb ./*.AppImage ./*.tar.gz SOURCES.txt upstream.tsv > SHA256SUMS.txt)
+  cp "$candidate/LINUX-NOTICE.md" "$staging/"
+  (cd "$staging" && sha256sum -- ./*.deb ./*.AppImage ./*.rpm ./*.tar.gz \
+    LINUX-NOTICE.md SOURCES.txt rpm-media-sources.tsv upstream.tsv > SHA256SUMS.txt)
   mv -T "$staging" "$release"
   staging=
 else
@@ -108,6 +115,14 @@ else
     echo '本地产物与当前上游标签不匹配，已保留原产物。' >&2
     exit 1
   }
+fi
+if ! grep -Eq '  \./[^/]+\.rpm$' "$release/SHA256SUMS.txt"; then
+  echo "本地产物的校验清单缺少 RPM，请将 $release 移到备份位置后重新构建。" >&2
+  exit 1
+fi
+if ! cmp -s "$root/LINUX-NOTICE.md" "$release/LINUX-NOTICE.md"; then
+  echo "本地产物的许可声明缺失或已过期，请将 $release 移到备份位置后重新构建。" >&2
+  exit 1
 fi
 (cd "$release" && sha256sum --check SHA256SUMS.txt)
 printf '本地 Release 已就绪：%s\n' "$release"
@@ -121,22 +136,24 @@ if ! command -v gh >/dev/null || ! gh auth status --hostname github.com >/dev/nu
 fi
 release_tag="linux-$tag"
 title="菜播·录包机 Linux $tag"
-fork_url="https://github.com/$fork.git"
-remote_tag=$(git ls-remote --refs "$fork_url" "refs/tags/$release_tag" | cut -f1)
+# Point the downstream tag at a packaging commit already pushed to the fork.
+# The exact upstream application revision is recorded in upstream.tsv.
+release_target=$(git -C "$root" rev-parse HEAD)
+remote_tag=$(git ls-remote --refs "https://github.com/$fork.git" "refs/tags/$release_tag" | cut -f1)
 if [[ -z "$remote_tag" ]]; then
-  publish_repo="$root"
-  if ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
-    publish_repo="$work/publish"
-    git init --quiet "$publish_repo"
-    git -C "$publish_repo" fetch --no-tags "$upstream" "$ref:refs/caibo/release"
-    [[ $(git -C "$publish_repo" rev-parse refs/caibo/release) == "$object" ]]
-  fi
-  git -C "$publish_repo" -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
-    push "$fork_url" "$commit:refs/tags/$release_tag"
-elif [[ "$remote_tag" != "$commit" ]]; then
+  gh api --method POST "repos/$fork/git/refs" \
+    -f "ref=refs/tags/$release_tag" -f "sha=$release_target" --silent
+elif [[ "$remote_tag" != "$release_target" && "$remote_tag" != "$commit" ]]; then
   echo "fork 的 $release_tag 已指向其他提交。" >&2
   exit 1
 fi
+
+{
+  printf '上游版本 %s · [对应上游提交](https://github.com/kk12091209/Caibaoliverecorder/tree/%s)\n\n' "$tag" "$commit"
+  cat "$release/LINUX-NOTICE.md"
+  printf '\n安装包包括 DEB、AppImage 和 RHEL 9 兼容的 x86_64 RPM。\n'
+  printf '\n本次发布的应用源码见附件 `Caibo-%s-linux-source.tar.gz`。\n' "$tag"
+} > "$work/notes"
 
 if gh release view "$release_tag" --repo "$fork" --json isDraft,name > "$work/remote.json" 2>/dev/null; then
   if [[ $(jq -r .isDraft "$work/remote.json") == false ]]; then
@@ -147,13 +164,13 @@ if gh release view "$release_tag" --repo "$fork" --json isDraft,name > "$work/re
   fi
   [[ $(jq -r .name "$work/remote.json") == "$title" ]] || { echo '现有草稿名称不匹配。' >&2; exit 1; }
 else
-  printf '上游版本 %s\n\n%s\n\n包含 Linux x86_64 DEB、AppImage、校验文件及对应应用源码。FFmpeg 和运行时源码地址见 SOURCES.txt。\n' \
-    "$tag" "https://github.com/kk12091209/Caibaoliverecorder/tree/$commit" > "$work/notes"
   gh release create "$release_tag" --repo "$fork" --verify-tag --draft \
     --title "$title" --notes-file "$work/notes"
 fi
 gh release upload "$release_tag" --repo "$fork" --clobber \
-  "$release/"*.deb "$release/"*.AppImage "$release/"*.tar.gz \
-  "$release/SOURCES.txt" "$release/upstream.tsv" "$release/SHA256SUMS.txt"
-gh release edit "$release_tag" --repo "$fork" --draft=false --latest
+  "$release/"*.deb "$release/"*.AppImage "$release/"*.rpm "$release/"*.tar.gz \
+  "$release/LINUX-NOTICE.md" "$release/SOURCES.txt" "$release/rpm-media-sources.tsv" "$release/upstream.tsv" "$release/SHA256SUMS.txt"
+latest=false
+if [[ "$ref" == "$(tail -n 1 "$work/stable" | cut -f2)" ]]; then latest=true; fi
+gh release edit "$release_tag" --repo "$fork" --draft=false --latest="$latest" --notes-file "$work/notes"
 gh release view "$release_tag" --repo "$fork" --json url --jq .url
