@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+appdir=$(dirname "$(readlink -f "$0")")
+exec "$appdir/usr/lib/caibo-recorder/caibo-recorder" "$@"

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=菜播·录包机
+Exec=caibo-recorder
+Icon=caibo-recorder
+Terminal=true
+Categories=AudioVideo;Video;

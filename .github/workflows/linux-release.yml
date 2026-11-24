@@ -1,0 +1,57 @@
+name: Linux release batch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream stable tag, for example v0.4.7. Leave blank for the latest stable tag."
+        type: string
+        required: false
+
+permissions:
+  contents: write
+concurrency:
+  group: linux-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'cairenbin/Caibaoliverecorder'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve upstream version
+        id: upstream
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ./live-editor/scripts/follow-upstream-linux.sh --check "$RELEASE_TAG"
+
+      - name: Check for an existing public release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: linux-${{ steps.upstream.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft | grep -qx false; then
+            echo 'published=true' >> "$GITHUB_OUTPUT"
+            echo "$RELEASE_TAG is already published."
+          fi
+
+      - name: Build and verify Linux packages
+        if: steps.existing.outputs.published != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+        run: ./live-editor/scripts/follow-upstream-linux.sh --build "$RELEASE_TAG"
+
+      - name: Publish to this fork
+        if: steps.existing.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+        run: ./live-editor/scripts/follow-upstream-linux.sh --publish "$RELEASE_TAG"
