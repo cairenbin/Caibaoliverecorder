@@ -9,7 +9,11 @@ cleanup() {
 }
 trap cleanup EXIT
 export DOTNET_ROLL_FORWARD=Major HOME="$work/home" DOTNET_CLI_HOME="$work/home" NUGET_PACKAGES="$work/nuget"
+# Docker may run under a numeric UID with no passwd entry. .NET uses
+# XDG_RUNTIME_DIR for its per-user NuGet and runtime mutex files.
+export XDG_RUNTIME_DIR="$work/xdg-runtime"
 mkdir -p "$HOME"
+install -d -m 700 "$XDG_RUNTIME_DIR"
 git -c safe.directory=/source clone --quiet --no-hardlinks /source "$work/src"
 cd "$work/src"
 # Build the current checkout in an isolated tree, including local edits to
