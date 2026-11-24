@@ -9,6 +9,8 @@
 
 作者：**糊涂小菜包** · 技术支持：**藤椒麦旋风** · [联系我们](https://space.bilibili.com/5162836)
 
+本 fork 的 Linux 发行版沿用 GPLv3。上游来源、Linux 修改及对应源码见 [Linux 版许可与修改声明](LINUX-NOTICE.md)。
+
 ## 产品
 
 | 产品 | 使用方式 | 源码与开发说明 |
@@ -25,6 +27,7 @@ GitHub [Releases](https://github.com/kk12091209/Caibaoliverecorder/releases/late
 
 - Windows 10 / 11 x64：选择 `*-setup.exe` 安装包，或完整解压便携包。
 - Mac M 系列、macOS 14+：选择 `*-macos-arm64.dmg`，将应用拖入“应用程序”。当前版本未经过 Apple 公证，首次打开方式见[完整使用指南](docs/RECORDER.md)。
+- Linux x86_64（包括 RHEL 9 兼容发行版的 RPM）：从本 fork 的 [Releases](https://github.com/cairenbin/Caibaoliverecorder/releases) 下载。安装步骤见 [Linux 打包与安装说明](live-editor/docs/LINUX.md)。
 - `Source code` / GitHub “Download ZIP” 是开发源码，不能当作安装包运行。
 
 ## 快速开始

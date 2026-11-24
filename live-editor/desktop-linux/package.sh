@@ -30,9 +30,13 @@ deb_version="${version/-beta./~beta.}-$revision"
 deb="caibo-recorder_${deb_version}_amd64.deb"
 appimage="Caibo-$version-r$revision-linux-x86_64.AppImage"
 manifest="SHA256SUMS-$version-r$revision-$format.txt"
-names=()
-[[ "$format" == appimage ]] || names+=("$deb")
-[[ "$format" == deb ]] || names+=("$appimage")
+case "$format" in
+  all) names=("$deb" "$appimage") ;;
+  deb) names=("$deb") ;;
+  appimage) names=("$appimage") ;;
+  rpm-payload) names=() ;;
+  *) exit 2 ;;
+esac
 for item in "${names[@]}" "$manifest"; do
   [[ ! -e "/output/$item" ]] || { echo "输出文件已存在：/output/$item" >&2; exit 1; }
 done
@@ -56,6 +60,7 @@ mkdir -p "$layout/usr/share/icons/hicolor/256x256/apps"
 icon="$layout/usr/share/icons/hicolor/256x256/apps/caibo-recorder.png"
 ffmpeg -hide_banner -loglevel error -i /source/live-editor/desktop/assets/app-original.png -vf scale=256:256 -frames:v 1 -threads 1 -update 1 "$icon"
 cp LICENSE "$doc/copyright"
+install -m 644 /source/LINUX-NOTICE.md "$doc/LINUX-NOTICE.md"
 cp THIRD_PARTY_NOTICES.md live-editor/package-lock.json "$doc/"
 cp -R live-editor/docs/licenses "$doc/product-notices"
 cp /opt/caibo-node/LICENSE "$doc/Node-LICENSE.txt"
@@ -67,7 +72,14 @@ done
 mkdir -p "$layout/usr/bin"
 ln -s ../lib/caibo-recorder/caibo-recorder "$layout/usr/bin/caibo-recorder"
 "$app/runtime/recorder/BililiveRecorder.Cli" --help >/dev/null
-if [[ "$format" != appimage ]]; then
+if [[ "$format" == all || "$format" == rpm-payload ]]; then
+  printf '%s %s\n' "$version" "$revision" > "$layout/.package-version"
+  tar -C "$layout" -cf /output/rpm-payload.tar .
+  rm "$layout/.package-version"
+fi
+if [[ "$format" == rpm-payload ]]; then exit 0; fi
+
+if [[ "$format" == all || "$format" == deb ]]; then
   mkdir "$layout/DEBIAN"
   cat > "$layout/DEBIAN/control" <<CONTROL
 Package: caibo-recorder
@@ -83,16 +95,18 @@ CONTROL
   dpkg-deb --root-owner-group --build "$layout" "$work/$deb"
   rm -r "$layout/DEBIAN"
   dpkg-deb -x "$work/$deb" "$work/deb-extracted"
+  cmp /source/LINUX-NOTICE.md "$work/deb-extracted/usr/share/doc/caibo-recorder/LINUX-NOTICE.md"
   bash "$linux/smoke.sh" "$work/deb-extracted/usr/bin/caibo-recorder"
 fi
 
-if [[ "$format" != deb ]]; then
+if [[ "$format" == all || "$format" == appimage ]]; then
   bash "$linux/bundle-media.sh" "$app/runtime/ffmpeg" "$doc/ffmpeg"
   install -m 755 "$linux/AppRun" "$layout/AppRun"
   ln -s usr/share/applications/caibo-recorder.desktop "$layout/caibo-recorder.desktop"
   ln -s usr/share/icons/hicolor/256x256/apps/caibo-recorder.png "$layout/caibo-recorder.png"
   bash "$linux/make-appimage.sh" "$layout" "$work/$appimage" /source/.tools/linux
   (cd "$work" && "./$appimage" --appimage-extract >/dev/null)
+  cmp /source/LINUX-NOTICE.md "$work/squashfs-root/usr/share/doc/caibo-recorder/LINUX-NOTICE.md"
   APPIMAGE_EXTRACT_AND_RUN=1 bash "$linux/smoke.sh" "$work/$appimage" "$work/squashfs-root/usr/lib/caibo-recorder/runtime/ffmpeg"
 fi
 

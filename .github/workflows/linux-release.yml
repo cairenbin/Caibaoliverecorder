@@ -7,6 +7,10 @@ on:
         description: "Upstream stable tag, for example v0.4.7. Leave blank for the latest stable tag."
         type: string
         required: false
+      publish:
+        description: "Publish to GitHub Releases. Uncheck to build and verify only."
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -32,6 +36,7 @@ jobs:
         run: ./live-editor/scripts/follow-upstream-linux.sh --check "$RELEASE_TAG"
 
       - name: Check for an existing public release
+        if: inputs.publish
         id: existing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,8 +54,17 @@ jobs:
           RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
         run: ./live-editor/scripts/follow-upstream-linux.sh --build "$RELEASE_TAG"
 
+      - name: Save verified packages without publishing a Release
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ steps.upstream.outputs.tag }}
+          path: release/linux/upstream/${{ steps.upstream.outputs.tag }}/*
+          if-no-files-found: error
+          compression-level: 0
+
       - name: Publish to this fork
-        if: steps.existing.outputs.published != 'true'
+        if: inputs.publish && steps.existing.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
