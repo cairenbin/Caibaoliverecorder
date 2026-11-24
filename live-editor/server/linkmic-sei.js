@@ -3,6 +3,7 @@ import { BILI_LAYOUTS, BILI_LAYOUT_VERSION } from './bilibili-layouts.js';
 import { biliCameraLayout, douyinCameraLayout } from './recording-layout.js';
 
 const MAX_SEI=128*1024;
+export const DOUYIN_VIDEO_LINKMIC_SCENE=20;
 const identifier=value=>typeof value==='string'&&/^[\w-]{1,100}$/.test(value)?value:
   Number.isSafeInteger(value)&&value>0?String(value):'';
 export function parsePlatformJson(text) {
@@ -68,31 +69,45 @@ function audienceFrame(app) {
     participants.unshift({x:0,y:0,w:1,h:1,linkId:'',owner:true,main:true});
   return {...empty,participants};
 }
-function douyinFrame(value) {
-  if(!Object.hasOwn(value||{},'app_data'))return null;
-  let app;try{app=typeof value.app_data==='string'?parsePlatformJson(value.app_data):value.app_data;}catch{return null;}
-  if(app?.ver===15)return audienceFrame(app);
-  if(!app||![2,6].includes(app.ver))return {platform:'douyin',participants:[]};
-  if(!Array.isArray(app.grids)||app.grids.length>64)return null;
-  const channel=identifier(app.channel_id);
-  if(!channel)return null;
-  // Game camera composites have a different coordinate transform. Hide those
-  // until that transform is known, instead of attaching a name to the game.
-  if(app.game_clip||app.camera_clip)return {platform:'douyin',channel,participants:[]};
+function douyinGridParticipants(app,crop,{numberedSeats=false}={}) {
   const participants=[],focus=app.anchor_interact_info?.layout_type?identifier(app.anchor_interact_info.focus_id):'';
-  const grids=app.ver===2?app.grids.slice(0,1):app.grids;
-  for(const grid of grids) {
+  const double=app.ver===2&&!numberedSeats;
+  const grids=(double?app.grids.slice(0,1):app.grids).filter(grid=>grid&&typeof grid==='object');
+  const positions=numberedSeats?grids.map(({p})=>typeof p==='string'&&/^(?:0|[1-9]\d?)$/.test(p)?Number(p):p):[];
+  for(const [index,grid] of grids.entries()) {
     const linkId=identifier(grid.uid_str)||identifier(grid.uid);
     if(!linkId||linkId==='mock_game_uid'||grid.alpha===0)continue;
+    const position=positions[index];
+    if(numberedSeats&&(!Number.isInteger(position)||position<0||position>=64||grid.visible===0||
+      positions.indexOf(position)!==positions.lastIndexOf(position)))continue;
     let rect={x:grid.x,y:grid.y,w:grid.w,h:grid.h};
-    const crop=value.live_crop;
-    if(app.ver===2&&crop) {
+    if(double&&crop) {
       if(![crop.crop_y,crop.crop_h,crop.stride_h].every(Number.isFinite)||crop.stride_h<=0)return null;
       rect={...rect,y:crop.crop_y/crop.stride_h,h:crop.crop_h/crop.stride_h};
     }
     if(validRect(rect)&&grids.filter(other=>(identifier(other.uid_str)||identifier(other.uid))===linkId).length===1)
       participants.push({...rect,linkId,...(focus===linkId||rect.x===0&&rect.y===0&&rect.w===1&&rect.h===1?{main:true}:{})});
   }
+  return participants;
+}
+function douyinFrame(value) {
+  if(!Object.hasOwn(value||{},'app_data'))return null;
+  let app;try{app=typeof value.app_data==='string'?parsePlatformJson(value.app_data):value.app_data;}catch{return null;}
+  if(!app)return {platform:'douyin',participants:[]};
+  const videoLinkmic=app.interactive_scene===DOUYIN_VIDEO_LINKMIC_SCENE&&Number.isInteger(app.ui_layout)&&app.ui_layout>0;
+  if(!videoLinkmic&&app.ver===15)return audienceFrame(app);
+  if(!videoLinkmic&&![2,6].includes(app.ver))return {platform:'douyin',participants:[]};
+  if(!Array.isArray(app.grids)||app.grids.length>64)return null;
+  const channel=identifier(app.channel_id);
+  if(!channel)return null;
+  // Game camera composites have a different coordinate transform.
+  if(app.game_clip||app.camera_clip||videoLinkmic&&app.hide_micseat===1)return {platform:'douyin',channel,participants:[]};
+  // Scene 20 provides normalized video rectangles independently of its SEI
+  // version and UI layout. The older editor only recognized PK (2, 6) and
+  // the audience floating-seat layout (15).
+  const participants=douyinGridParticipants(app,value.live_crop,{numberedSeats:videoLinkmic});
+  if(!participants)return null;
+  if(videoLinkmic)return {platform:'douyin',channel,scene:DOUYIN_VIDEO_LINKMIC_SCENE,participants};
   // The double-link protocol sends the remote tile only. Its own player adds
   // the local anchor on the left. Do so only for the exact half-width layout.
   if(app.ver===2&&participants.length===1&&Math.abs(participants[0].x-.5)<.001&&Math.abs(participants[0].w-.5)<.001)

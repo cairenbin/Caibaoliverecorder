@@ -5,7 +5,7 @@ import { cameraLayout } from '../shared/recording-style.js';
 import { labelGeometry } from '../shared/linkmic-labels.js';
 import { LinkmicAvatars } from './linkmic-avatars.js';
 
-const VERSION=8,TTL=6,CAMERA_TTL=10;
+const VERSION=9,TTL=6,CAMERA_TTL=10;
 const stamp=tag=>(tag.readUIntBE(4,3)+tag[7]*16777216)/1000;
 
 // Both timelines coalesce repeated SEI frames, but keep separate expiry windows
@@ -120,7 +120,8 @@ export class LinkmicIndex {
     const owner=this.store.setting('linkmic-owner:'+source.id);
     if(!owner?.roomId||!owner?.id)return;
     this.retry.set(key,Date.now()+15000);
-    const operation=this.resolver.linkmic({roomId:owner.roomId,anchorId:owner.id,channel:frame.channel,version:frame.version,signal:this.abort.signal})
+    const operation=this.resolver.linkmic({roomId:owner.roomId,anchorId:owner.id,channel:frame.channel,version:frame.version,
+      ...(frame.scene===undefined?{}:{scene:frame.scene}),signal:this.abort.signal})
       .then(async people=>{
         if(this.closed||!this.store.session(source.session))return;
         this.store.transaction(()=>{for(const person of people)this.store.run(

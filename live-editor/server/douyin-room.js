@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {isPublicMediaIp} from './public-media-ip.js';
 import { signRoomQuery } from './douyin-signing.js';
-import { parsePlatformJson } from './linkmic-sei.js';
+import { DOUYIN_VIDEO_LINKMIC_SCENE, parsePlatformJson } from './linkmic-sei.js';
 import { labelText } from '../shared/linkmic-labels.js';
 import { avatarUrl } from './linkmic-avatars.js';
 import { douyinCameraLayout } from './recording-layout.js';
@@ -53,6 +53,15 @@ function reflowWebRid(html,url) {
   }
   return ids.size===1?[...ids][0]:'';
 }
+function isLiveRoomQueryPage(url) {
+  if (url.hostname === 'live.douyin.com') return url.pathname === '/' || url.pathname.startsWith('/categorynew/');
+  if (!['www.douyin.com', 'douyin.com'].includes(url.hostname)) return false;
+  const type = url.searchParams.get('type');
+  if (url.pathname.startsWith('/search/')) return type === 'live';
+  // A live overlay opened from a profile's search results keeps the search
+  // page in the address bar, even though it has selected an explicit room.
+  return ['general', 'live'].includes(type) && /^\/user\/[A-Za-z0-9_.-]{8,160}\/search\/[^/]+\/?$/.test(url.pathname);
+}
 export async function resolveDouyinLink(input, { request = fetch, signal } = {}) {
   const link = String(input).match(/https?:\/\/[^\s<>]+/)?.[0]?.replace(/[，。；！）】]+$/u, '');
   if (!link) throw new Error('请粘贴抖音直播间链接。');
@@ -60,9 +69,7 @@ export async function resolveDouyinLink(input, { request = fetch, signal } = {})
   for (let attempt = 0; attempt < 6; attempt++) {
     const match = url.hostname === 'live.douyin.com' && /^\/(\d{1,20})\/?$/.exec(url.pathname);
     if (match) return { platform: 'douyin', webRid: match[1], key: 'douyin:' + match[1], url: 'https://live.douyin.com/' + match[1] };
-    const explicitRoomPage=url.hostname==='live.douyin.com'&&(url.pathname==='/'||url.pathname.startsWith('/categorynew/'))||
-      url.hostname==='www.douyin.com'&&url.pathname.startsWith('/search/')&&url.searchParams.get('type')==='live';
-    if(explicitRoomPage&&url.searchParams.has('live_web_rid')){
+    if(isLiveRoomQueryPage(url)&&url.searchParams.has('live_web_rid')){
       const values=url.searchParams.getAll('live_web_rid');
       if(values.length!==1||!/^\d{1,20}$/.test(values[0]))throw new Error('抖音房间编号无效。');
       return {platform:'douyin',webRid:values[0],key:'douyin:'+values[0],url:'https://live.douyin.com/'+values[0]};
@@ -202,11 +209,13 @@ export class DouyinResolver {
       title: String(room.title || '抖音直播').slice(0,300), name: String(room.owner?.nickname || data.data.user?.nickname || '抖音直播间').slice(0,100),
       stream, cookie: visitor.cookie, userUniqueId: visitor.userUniqueId };
   }
-  async linkmic({roomId,anchorId,channel,version,signal}) {
+  async linkmic({roomId,anchorId,channel,version,scene,signal}) {
     if(![roomId,anchorId,channel].every(value=>/^\d{1,20}$/.test(value)))throw new Error('连麦房间编号无效。');
+    const videoLinkmic=scene===DOUYIN_VIDEO_LINKMIC_SCENE;
+    if(videoLinkmic&&channel!==roomId)throw new Error('连麦房间编号无效。');
     signal=signal?AbortSignal.any([signal,AbortSignal.timeout(12000)]):AbortSignal.timeout(12000);
     const visitor=await this.cookie(signal);
-    const audience=version===15;
+    const audience=version===15||videoLinkmic;
     const query=new URLSearchParams({aid:'6383',app_name:'douyin_web',live_id:'1',device_platform:'web',
       room_id:roomId,anchor_id:anchorId,...(audience?{}:{channel_id:channel,offset:'0',count:'50',link_status:'4',
         scene:version===2?'1':'7',request_source:version===2?'audience_enter_room':'receive_multi_linker_sei'})});
@@ -216,19 +225,19 @@ export class DouyinResolver {
         {signal,redirect:'error',headers:{'User-Agent':DOUYIN_USER_AGENT,Referer:'https://live.douyin.com/',Cookie:visitor.cookie}});
       return parsePlatformJson(await readBoundedResponse(response,2*1024*1024));
     };
-    let result=await requestRoster(audience?'/webcast/linkmic_audience/list/v2/':'/webcast/linkmic/list/');
+    let result=videoLinkmic?null:await requestRoster(audience?'/webcast/linkmic_audience/list/v2/':'/webcast/linkmic/list/');
     // New video-link rooms report "linkmic has closed" on v2 even while the
     // guest is on screen. Their web player uses v3's occupied positions. Do
     // not retry network/auth/rate-limit failures or infer membership from names.
-    if(audience&&result.status_code===31001){
-      const current=await requestRoster('/webcast/linkmic_audience/list/v3/'),basic=current.data?.basic;
-      if(current.status_code!==0||String(basic?.owner_user_id||'')!==anchorId||!Array.isArray(basic?.positions))throw new Error('连麦名单暂时不可用。');
+    if(videoLinkmic||audience&&result?.status_code===31001){
+      const current=await requestRoster('/webcast/linkmic_audience/list/v3/'),basic=current?.data?.basic;
+      if(current?.status_code!==0||String(basic?.owner_user_id||'')!==anchorId||!Array.isArray(basic?.positions))throw new Error('连麦名单暂时不可用。');
       result={status_code:0,data:{user:basic.positions.slice(0,64)
         .filter(position=>position?.status===1&&String(position.user?.linker_room_id||'')===roomId)
         .map(({user})=>({linkmic_id_str:user.linkmic_id_str,user:{id_str:user.user_id,nickname:user.nickname,
           avatar_medium:{url_list:[user.avatar_medium_url,user.avatar_thumb_url]}}}))}};
     }
-    if(result.status_code!==0||!Array.isArray(result.data?.user))throw new Error('连麦名单暂时不可用。');
+    if(result?.status_code!==0||!Array.isArray(result.data?.user))throw new Error('连麦名单暂时不可用。');
     return result.data.user.slice(0,64).map(entry=>({linkId:String(entry.linkmic_id_str||''),id:String(entry.user?.id_str||''),name:labelText(entry.user?.nickname),avatarUrl:avatarUrl(entry.user),...(/^[1-9]\d{0,19}$/.test(entry.user?.web_rid||'')?{webRid:entry.user.web_rid}:{})}))
       .filter(person=>/^[\w-]{1,100}$/.test(person.linkId)&&/^\d{1,20}$/.test(person.id));
   }

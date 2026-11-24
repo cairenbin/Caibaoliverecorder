@@ -29,6 +29,14 @@ test('new video-link rooms recover the exact occupied guest from v3 when v2 repo
   }
 });
 
+test('video-linkmic SEI uses the v3 roster for the recording room',async()=>{
+  const {resolver,calls}=fixture();
+  assert.equal((await resolver.linkmic({...args,scene:20}))[0].name,'连线嘉宾');
+  assert.deepEqual(calls.map(({url})=>url.pathname),['/webcast/linkmic_audience/list/v3/']);
+  await assert.rejects(resolver.linkmic({...args,scene:20,channel:'999'}),/编号无效/);
+  assert.equal(calls.length,1);
+});
+
 test('v3 numeric uint64 identities stay exact; empty seats, inactive guests and other rooms never confirm membership',async()=>{
   const raw=JSON.stringify(roster([position(),position(uid,{status:0}),position('88',{user:{...position().user,linker_room_id:'999'}}),{status:0}]))
     .replace('"user_id":"'+uid+'"','"user_id":'+uid);

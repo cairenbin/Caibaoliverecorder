@@ -75,6 +75,18 @@ test('monitoring a room resolves its owner UID and the same profile resolves to 
  metadata.ownerId='';await assert.rejects(discovery.monitorIdentity('https://live.douyin.com/123'),/无法核验/);
 });
 
+test('a live overlay opened from profile search monitors the selected room owner',async()=>{
+ const webRid='176494061774',calls=[];
+ const discovery=new DouyinUserDiscovery({resolver:{room:async id=>{
+  calls.push(id);return {webRid:id,ownerId:uid,name:'直播间主播'};
+ }},request:async()=>assert.fail('room ID is already present in the URL')});
+ const search='https://www.douyin.com/user/MS4wLjABAAAA-dwvL1IHXsNlpX6SRWkDnWdtZ4r2VSrAiyZWFHyG9Y7SJ8OuRtmQrFvmniff1wrv/search/king%E7%9A%87%E5%84%BF?aid=587521b0-b614-489c-b1c1-ab895fbd1da4&live_web_rid=176494061774&type=general';
+ const direct=await discovery.monitorIdentity('https://live.douyin.com/'+webRid+'?enter_from_merge=link_share');
+ assert.deepEqual(await discovery.monitorIdentity(search),direct);
+ assert.deepEqual(calls,[webRid,webRid]);
+ await assert.rejects(discovery.monitorIdentity(search+'&live_web_rid=123'),/编号无效/);
+});
+
 test('known own room is checked by exact owner UID; offline or another owner cannot suppress guest discovery',async()=>{
  let metadata={webRid:'123',roomId,ownerId:uid,name:'本人',streaming:true,stream:{url:'fixture'}};
  const discovery=new DouyinUserDiscovery({resolver:{room:async()=>metadata}});let checks=0;

@@ -49,6 +49,50 @@ test('Douyin positions labels inside the real PK crop, not the full portrait can
   const multi={app_data:JSON.stringify({channel_id:'99',ver:6,grids:[{uid_str:'a',x:0,y:0,w:.5,h:.5},{uid_str:'b',x:.5,y:.5,w:.5,h:.5}]})};
   assert.equal(linkmicSei(seiTag(multi,100))[0].participants.length,2);
 });
+const nineVideoSeats=()=>Array.from({length:9},(_,p)=>({p,uid_str:'guest_'+p,
+  ...(p<2?{x:p/2,y:.2,w:.5,h:.4}:{x:((p-2)%4)/4,y:p<6?.6:.725,w:.25,h:.125})}));
+test('an empty slot in a nine-participant Douyin PK layout does not hide everyone',()=>{
+  const seats=nineVideoSeats(),app_data={ver:6,channel_id:'998',grids:[...seats,null]};
+  assert.equal(linkmicSei(seiTag({app_data},100))[0].participants.length,9);
+});
+test('Douyin video-linkmic labels use the stated geometry and ignore unknown and conflicting seats',()=>{
+  const seats=nineVideoSeats();
+  seats[6].p='6';
+  const app_data={ver:3,interactive_scene:20,ui_layout:132,channel_id:'998',grids:[...seats].reverse()};
+  const frame=()=>linkmicSei(seiTag({app_data},100))[0];
+  assert.equal(frame().scene,20);
+  assert.deepEqual(frame().participants.find(person=>person.linkId==='guest_6'),{x:0,y:.725,w:.25,h:.125,linkId:'guest_6'});
+  assert.equal(frame().participants.length,9);
+  app_data.grids=[...seats,{...seats[6],p:6,uid_str:'conflicting'},null,{p:9,uid_str:'no_position'}];
+  assert.equal(frame().participants.length,8);
+  assert.equal(frame().participants.some(person=>person.linkId==='guest_6'),false);
+  app_data.hide_micseat=1;
+  assert.deepEqual(frame().participants,[]);
+});
+test('Douyin video-linkmic labels are rebuilt for previously indexed sources without a current roster',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'caibao-linkmic-grid-')),store=new Store(root);
+  const index=new LinkmicIndex(store);
+  t.after(async()=>{await index.close();store.close();await fs.rm(root,{recursive:true,force:true});});
+  const session=store.createSession({status:'finished'}),file=path.join(root,'sample.flv');
+  const seats=nineVideoSeats();
+  // The video-linkmic payload can omit ver. Seats carry their own video
+  // rectangles in the 132 layout; the tenth slot is unoccupied.
+  const scene={app_data:{interactive_scene:20,ui_layout:132,channel_id:'998',grids:[...seats,null]}};
+  const bytes=Buffer.concat([FLV_HEADER,seiTag(scene,100,1)]);
+  await fs.writeFile(file,bytes);
+  const source=store.addSource(session.id,file);
+  store.run('UPDATE sources SET duration=5,closed=2 WHERE id=?',source.id);
+  store.setting('linkmic-index:'+source.id,{version:8,pos:bytes.length,seq:0,lengthSize:4,mode:'original',complete:true});
+  store.run('INSERT INTO linkmic_people(source,channel,link_id,id,name) VALUES(?,?,?,?,?)',source.id,'998','guest_3','103','嘉宾三');
+  await index.ensure(session.id);
+  const events=index.events(session.id),people=labelsAt(events,1.5);
+  assert.deepEqual(people.map(p=>p.linkId),seats.map(p=>p.uid_str));
+  assert.equal(people.filter(p=>labelGeometry(p,360,640)?.text).length,9);
+  assert.equal(participantName(people[6]),'连麦 guest_6');
+  const ass=linkmicAss(events,360,640);
+  assert.equal([...ass.matchAll(/^Dialogue:/gm)].length,9);
+  assert.match(ass,/嘉宾三/);
+});
 test('bounded SEI parsing handles NAL length sizes, unrelated messages, invalid rectangles and uint64 IDs',()=>{
   for(const size of [2,3,4])assert.equal(linkmicSei(seiTag(bili(),5,0,size),size)[0].participants.length,3);
   assert.deepEqual(linkmicSei(seiTag({app_data:'{broken'},100)),[]);
